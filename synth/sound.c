@@ -1,0 +1,69 @@
+// also thank conmidi for existing
+#include "KDMAPI.h"
+#include "../misc/uint24.h"
+#include "../playback/playback_thread.h"
+#include <stdio.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <pthread.h>
+void (*SendDirectData)(uint32_t message);
+#if defined(_WIN32) || defined(_WIN64)
+    int32_t (*SendDirectLongData)(MIDIHDR* a, int32_t b);    
+    int32_t (*PrepareLongData)(MIDIHDR* a, int32_t b);
+    int32_t (*UnprepareLongData)(MIDIHDR* a, int32_t b);
+#else
+    int32_t (*SendDirectLongData)(uint8_t* a, int32_t b);    
+#endif
+int32_t (*GetVoiceCount)(void);
+uint24_t* ringbuffer = NULL;
+int32_t voicefetching = 0;
+const uint32_t RINGBUFFER_SIZE = 8388608;
+const uint32_t RINGBUFFER_MASK = RINGBUFFER_SIZE - 1;
+pthread_t audio_thread;
+
+void* audiothread(void* args)
+{
+    uint16_t readptr = 0;
+    puts("audio thread intialized");
+    while(!stopping)
+    {
+        int32_t val = uint24_get(ringbuffer + readptr);
+        if(val != 0)
+        {
+            SendDirectData((uint32_t)val);
+            ringbuffer[readptr] = uint24_from(0);
+        }
+        readptr++;
+    }
+    free(ringbuffer);
+    pthread_exit(NULL);
+    return NULL;
+}
+
+void Sound_Init(int32_t singlethread) 
+{
+    if(!KDMAPI_Setup()){ printf("\nThis program requires OmniMIDI to have functioning audio!\n"); return; };
+
+    KDMAPI_InitializeKDMAPIStream();
+    SendDirectData = KDMAPI_SendDirectData;
+    SendDirectLongData = KDMAPI_SendDirectLongData;
+    GetVoiceCount = KDMAPI_GetVoiceCount;
+    #if defined(_WIN32) || defined(_WIN64)
+        PrepareLongData = KDMAPI_PrepareLongData;
+        UnprepareLongData = KDMAPI_UnprepareLongData;
+    #endif
+    if(hasvoice)
+        voicefetching = 1;
+    if(!singlethread)
+    {
+        ringbuffer = (uint24_t*)calloc(UINT16_MAX + 1, sizeof(uint24_t));
+        pthread_create(&audio_thread, NULL, audiothread, NULL);
+        //pthread_join(audio_thread, NULL);
+    }
+}
+
+void AllNotesOFF(void)
+{
+    for (int channel = 0; channel < 16; channel++)
+        SendDirectData((uint32_t)(0xB0 | channel) | (0x7B << 8));
+}
