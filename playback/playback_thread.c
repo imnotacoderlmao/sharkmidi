@@ -138,9 +138,7 @@ void StartPlayback(int singlethread)
     uint24_t* eventptr = eventArr;
     TickGroup* timing = timingArr;
     TempoEvent* tempo = tempoArr;
-    int32_t tempoidx = 0;
     SysExEvent* sysex = sysexArr;
-    int32_t sysexidx = 0;
     current_clock = 0;
     size_t played = 0;
     pthread_t stats_thread;
@@ -158,10 +156,10 @@ void StartPlayback(int singlethread)
                 played = timing->event_offset;
                 playednotes -= timing->notecount;
             }
-            while (tempo[tempoidx].tick > clock && tempoidx > 0) 
-                tempoidx--;
-            while (sysex[sysexidx].tick > clock && sysexidx > 0) 
-                sysexidx--;
+            while (tempo->tick > clock && tempo > tempoArr) 
+                tempo--;
+            while (sysex->tick > clock && sysex > sysexArr)
+                sysex--;
         }
         while (timing->tick < clock)
         {
@@ -169,7 +167,7 @@ void StartPlayback(int singlethread)
             if (!skipping)
             {
                 size_t count =  timing->event_offset;
-                if (__builtin_expect(!singlethread, 1))
+                if (!singlethread)
                 {
                     while (played < count)
                     {
@@ -191,15 +189,15 @@ void StartPlayback(int singlethread)
             playednotes += timing->notecount;
             timing++;
         }
-        while (tempo[tempoidx].tick <= clock)
+        while (tempo->tick <= clock)
         {
-            SetBPM(tempo[tempoidx].microsec);
-            tempoidx++;
+            SetBPM(tempo->microsec);
+            tempo++;
         }
-        while (sysex[sysexidx].tick <= clock)
+        while (sysex->tick <= clock)
         {
-            SubmitSysEx(sysex[sysexidx]);
-            sysexidx++;
+            SubmitSysEx(*sysex);
+            sysex++;
         }
     }
     clock_start();

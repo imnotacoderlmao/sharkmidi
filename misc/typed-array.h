@@ -6,7 +6,8 @@ typedef struct                                                               \
     int64_t count;                                                           \
     int64_t cap;                                                             \
 } T##_arr;                                                                   \
-static inline void T##_arr_push(T##_arr* a, T item)                          \
+__attribute__((noinline))                                                    \
+static void T##_arr_push(T##_arr* a, T item)                                 \
 {                                                                            \
     if (a->count >= a->cap)                                                  \
     {                                                                        \
@@ -15,7 +16,8 @@ static inline void T##_arr_push(T##_arr* a, T item)                          \
     }                                                                        \
     a->data[a->count++] = item;                                              \
 }                                                                            \
-static inline void T##_arr_free(T##_arr* a)                                  \
+__attribute__((noinline))                                                    \
+static void T##_arr_free(T##_arr* a)                                         \
 {                                                                            \
     free(a->data);                                                           \
     *a = (T##_arr){0};                                                       \

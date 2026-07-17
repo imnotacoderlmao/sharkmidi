@@ -78,7 +78,7 @@ static uint16_t ReadUInt16(void)
     return __builtin_bswap16(val);
 }
 
-static int SearchText(uint8_t* text)
+static int SearchText(char* text)
 {
     for (int32_t i = 0; i < strlen(text); i++)
     {
@@ -140,7 +140,7 @@ static int cmp_sysex(const void* a, const void* b)
     return (posa > posb) - (posa < posb);
 }
 
-int32_t InitMMF(uint8_t* filepath)
+int32_t InitMMF(char* filepath)
 {
     int filedesc = open(filepath, O_RDONLY);
     if (fstat(filedesc, &filestat) == -1)
@@ -157,8 +157,10 @@ int32_t InitMMF(uint8_t* filepath)
     return 1;
 }
 
-void countTrackEvents(uint8_t* trackPtr, uint8_t* trackEnd, TickGroup_arr* tickgroup)
+int64_t CountTrackEvents(uint8_t* trackPtr, uint8_t* trackEnd, TickGroup_arr* tickgroup)
 {
+    int64_t totalnotes_local = 0;
+    int64_t eventcount_local = 0;
     int32_t absolutetime = 0;
     uint8_t prevEvent = 0;
     int32_t trackMaxTick = 0;
@@ -187,8 +189,8 @@ void countTrackEvents(uint8_t* trackPtr, uint8_t* trackEnd, TickGroup_arr* tickg
             {
                 TickGroup group = {absolutetime, notecount, count};
                 TickGroup_arr_push(tickgroup, group);
-                add(eventcount, count);
-                add(totalnotes, notecount);
+                eventcount_local += count;
+                totalnotes_local += notecount;
                 //eventcount += count;
                 //totalnotes += notecount;
                 notecount = 0;
@@ -278,10 +280,11 @@ void countTrackEvents(uint8_t* trackPtr, uint8_t* trackEnd, TickGroup_arr* tickg
         {
             TickGroup group = {absolutetime, notecount, count};
             TickGroup_arr_push(tickgroup, group);
-            add(eventcount, count);
-            add(totalnotes, notecount);
+            eventcount_local += count;
+            totalnotes_local += notecount;
         }
-        return;
+        add(totalnotes, totalnotes_local);
+        return eventcount_local;
 }
 
 int64_t ParseTrackEvents(uint8_t* trackPtr, uint8_t* trackEnd, uint24_t* msgPtr, int64_t* writeCursors, TempoEvent_arr* tempo, SysExEvent_arr* sysex)
@@ -433,7 +436,7 @@ int64_t ParseTrackEvents(uint8_t* trackPtr, uint8_t* trackEnd, uint24_t* msgPtr,
     return notecount;
 }
 
-int32_t LoadMIDI(uint8_t* filepath)
+int32_t LoadMIDI(char* filepath)
 {
     midiloaded = 0;
     printf("loading %s or something\n", filepath);
@@ -459,7 +462,7 @@ int32_t LoadMIDI(uint8_t* filepath)
     {
         trackProperties* currtrack = &tracks.data[i];
         uint8_t* trackstart = filePtr + currtrack->start;
-        countTrackEvents(trackstart, trackstart + currtrack->length, &histogram[i]);
+        add(eventcount, CountTrackEvents(trackstart, trackstart + currtrack->length, &histogram[i]));
         add(loadedtracks, 1);
         printf("(%d/%d) tracks scanned, %ld notes counted\r", loadedtracks, trackAmount, totalnotes);
     }

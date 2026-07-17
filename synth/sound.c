@@ -8,11 +8,11 @@
 #include <pthread.h>
 void (*SendDirectData)(uint32_t message);
 #if defined(_WIN32) || defined(_WIN64)
-    int32_t (*SendDirectLongData)(MIDIHDR* a, int32_t b);    
-    int32_t (*PrepareLongData)(MIDIHDR* a, int32_t b);
-    int32_t (*UnprepareLongData)(MIDIHDR* a, int32_t b);
+    int32_t (*SendDirectLongData)(MIDIHDR* hdr, int32_t hdrsize);    
+    int32_t (*PrepareLongData)(MIDIHDR* hdr, int32_t hdrsize);
+    int32_t (*UnprepareLongData)(MIDIHDR* hdr, int32_t hdrsize);
 #else
-    int32_t (*SendDirectLongData)(uint8_t* a, int32_t b);    
+    int32_t (*SendDirectLongData)(uint8_t* message, int32_t messagesize);    
 #endif
 int32_t (*GetVoiceCount)(void);
 uint24_t* ringbuffer = NULL;
