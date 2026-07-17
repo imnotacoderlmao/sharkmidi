@@ -168,7 +168,7 @@ void countTrackEvents(uint8_t* trackPtr, uint8_t* trackEnd, TickGroup_arr* tickg
     while (trackPtr < trackEnd)
     {
         // also inline varlen decode
-        uint8_t delta = *trackPtr++;
+        int32_t delta = *trackPtr++;
         if (delta >= 0x80)
         {
             delta &= 0x7F;
@@ -298,7 +298,7 @@ int64_t ParseTrackEvents(uint8_t* trackPtr, uint8_t* trackEnd, uint24_t* msgPtr,
     while (trackPtr < trackEnd)
     {
         // inline varlen decode
-        uint8_t delta = *trackPtr++;
+        int32_t delta = *trackPtr++;
         if (delta >= 0x80)
         {
             delta &= 0x7F;
@@ -310,6 +310,7 @@ int64_t ParseTrackEvents(uint8_t* trackPtr, uint8_t* trackEnd, uint24_t* msgPtr,
             } 
             while (b >= 0x80);
         }
+        absolutetime += delta;
         uint8_t readEvent = *trackPtr++;
         if (readEvent >= 0x80)
         {
@@ -318,18 +319,17 @@ int64_t ParseTrackEvents(uint8_t* trackPtr, uint8_t* trackEnd, uint24_t* msgPtr,
                 prevEvent = readEvent;
                 if ((readEvent & 0xE0) != 0xC0)
                 {
-                    uint8_t data1 = *trackPtr;
-                    uint8_t data2 = *(trackPtr + 1);
+                    uint8_t data1 = *trackPtr++;
+                    uint8_t data2 = *trackPtr++;
                     if ((readEvent & 0xF0) == 0x90 && data2 != 0)
                         notecount++;
                     msgPtr[next_pos] = uint24_from(readEvent | (data1 << 8) | (data2 << 16));
                 }
                 else
                 {
-                    uint8_t data1 = *(trackPtr);
+                    uint8_t data1 = *trackPtr++;
                     msgPtr[next_pos] = uint24_from(readEvent | (data1 << 8));
                 }
-                trackPtr += ((readEvent & 0xE0) == 0xC0) ? 1 : 2;
             }
             else
             {

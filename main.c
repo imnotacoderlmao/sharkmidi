@@ -18,7 +18,8 @@ int main(int32_t argc, char* argv[])
     int32_t singlethread = (argv[2] != NULL && strcmp(argv[2], "true") == 0)? 1 : 0;
     if(LoadMIDI(argv[1]))
     {
-        Sound_Init(singlethread);
+        if(!Sound_Init(singlethread))
+            return 1;
         StartPlayback(singlethread);
         UnloadMIDI();
     }

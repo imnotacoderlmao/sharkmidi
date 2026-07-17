@@ -136,14 +136,13 @@ void StartPlayback(int singlethread)
     stopping = 0;
     playednotes = 0, playednotes2 = 0;
     uint24_t* eventptr = eventArr;
-    uint24_t* currev = eventptr;
     TickGroup* timing = timingArr;
     TempoEvent* tempo = tempoArr;
     int32_t tempoidx = 0;
-    uint16_t rb_write = 0;
     SysExEvent* sysex = sysexArr;
     int32_t sysexidx = 0;
     current_clock = 0;
+    size_t played = 0;
     pthread_t stats_thread;
     pthread_create(&stats_thread, NULL, PlaybackStats, NULL);
     clock_start();
@@ -156,7 +155,7 @@ void StartPlayback(int singlethread)
             while (timing->tick > clock && clock > 0)
             {
                 timing--;
-                currev = eventptr + timing->event_offset;
+                played = timing->event_offset;
                 playednotes -= timing->notecount;
             }
             while (tempo[tempoidx].tick > clock && tempoidx > 0) 
@@ -169,29 +168,26 @@ void StartPlayback(int singlethread)
             current_clock = timing->tick;
             if (!skipping)
             {
-                uint24_t* targetMsg = eventptr + timing->event_offset;
+                size_t count =  timing->event_offset;
                 if (__builtin_expect(!singlethread, 1))
                 {
-                    size_t count = targetMsg - currev;\
-                    size_t copied = 0;
-                    while (copied < count)
+                    while (played < count)
                     {
-                        size_t remaining = count - copied;
-                        size_t free = RINGBUFFER_SIZE - rb_write;
-                        size_t chunk = MIN(remaining, free);
-                        memcpy(ringbuffer + rb_write, currev + copied, chunk * sizeof(uint24_t));
-                        rb_write = (rb_write + chunk) & RINGBUFFER_MASK;
-                        copied += chunk;
+                        size_t rb_write = played & RINGBUFFER_MASK;
+                        size_t chunk = MIN(count - played, RINGBUFFER_SIZE - rb_write);
+                        memcpy(ringbuffer + rb_write, eventptr + played, chunk * sizeof(uint24_t));
+                        played += chunk;
                     }
+                    writeptr = played & RINGBUFFER_MASK;
                 }
                 else
                 { 
-                    while (currev < targetMsg)
-                        SendDirectData((uint32_t)uint24_get(currev++));
+                    while (played < count)
+                        SendDirectData((uint32_t)uint24_get(eventptr + played++));
                 }
             }
             else
-                currev = eventptr + timing->event_offset;
+                played = timing->event_offset;
             playednotes += timing->notecount;
             timing++;
         }

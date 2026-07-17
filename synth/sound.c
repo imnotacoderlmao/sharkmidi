@@ -17,32 +17,32 @@ void (*SendDirectData)(uint32_t message);
 int32_t (*GetVoiceCount)(void);
 uint24_t* ringbuffer = NULL;
 int32_t voicefetching = 0;
+volatile uint32_t writeptr = 0;
+volatile uint32_t readptr = 0;
 const uint32_t RINGBUFFER_SIZE = 8388608;
 const uint32_t RINGBUFFER_MASK = RINGBUFFER_SIZE - 1;
 pthread_t audio_thread;
 
 void* audiothread(void* args)
 {
-    uint16_t readptr = 0;
     puts("audio thread intialized");
     while(!stopping)
     {
-        int32_t val = uint24_get(ringbuffer + readptr);
-        if(val != 0)
+        while (readptr != writeptr)
         {
+            int32_t val = uint24_get(ringbuffer + readptr);
             SendDirectData((uint32_t)val);
-            ringbuffer[readptr] = uint24_from(0);
+            readptr = (readptr + 1) & RINGBUFFER_MASK;
         }
-        readptr++;
     }
     free(ringbuffer);
     pthread_exit(NULL);
     return NULL;
 }
 
-void Sound_Init(int32_t singlethread) 
+int32_t Sound_Init(int32_t singlethread) 
 {
-    if(!KDMAPI_Setup()){ printf("\nThis program requires OmniMIDI to have functioning audio!\n"); return; };
+    if(!KDMAPI_Setup()){ printf("\nThis program requires OmniMIDI to have functioning audio!\n"); return 0; };
 
     KDMAPI_InitializeKDMAPIStream();
     SendDirectData = KDMAPI_SendDirectData;
@@ -56,10 +56,11 @@ void Sound_Init(int32_t singlethread)
         voicefetching = 1;
     if(!singlethread)
     {
-        ringbuffer = (uint24_t*)calloc(UINT16_MAX + 1, sizeof(uint24_t));
+        ringbuffer = (uint24_t*)calloc(RINGBUFFER_SIZE, sizeof(uint24_t));
         pthread_create(&audio_thread, NULL, audiothread, NULL);
         //pthread_join(audio_thread, NULL);
     }
+    return 1;
 }
 
 void AllNotesOFF(void)
