@@ -160,7 +160,6 @@ int32_t InitMMF(uint8_t* filepath)
 void countTrackEvents(uint8_t* trackPtr, uint8_t* trackEnd, TickGroup_arr* tickgroup)
 {
     int32_t absolutetime = 0;
-    int32_t lastTick = 0;
     uint8_t prevEvent = 0;
     int32_t trackMaxTick = 0;
     uint64_t count = 0;
@@ -169,112 +168,104 @@ void countTrackEvents(uint8_t* trackPtr, uint8_t* trackEnd, TickGroup_arr* tickg
     while (trackPtr < trackEnd)
     {
         // also inline varlen decode
-        uint8_t b = *trackPtr++;
-        if ((b & 0x80) == 0)
-            absolutetime += b;
-        else
+        uint8_t delta = *trackPtr++;
+        if (delta >= 0x80)
         {
-            int delta = b & 0x7F;
+            delta &= 0x7F;
+            uint8_t b = 0;
             do 
             { 
-                b = *(trackPtr++); 
+                b = *trackPtr++;
                 delta = (delta << 7) | (b & 0x7F); 
             } 
-            while ((b & 0x80) != 0);
+            while (b >= 0x80);
+        }
+
+        if(delta > 0)
+        {
+            if (count > 0)
+            {
+                TickGroup group = {absolutetime, notecount, count};
+                TickGroup_arr_push(tickgroup, group);
+                add(eventcount, count);
+                add(totalnotes, notecount);
+                //eventcount += count;
+                //totalnotes += notecount;
+                notecount = 0;
+                count = 0;
+            }
             absolutetime += delta;
         }
+        
         uint8_t readEvent = *trackPtr++;
-        if (readEvent < 0x80)
+        if (readEvent >= 0x80)
         {
-            trackPtr--;
-            readEvent = prevEvent; 
-        }
-        uint8_t status = (uint8_t)(readEvent & 0xF0);
-        
-        if (readEvent >= 0x80 && readEvent < 0xF0)
-            prevEvent = readEvent;
-        
-        switch (readEvent)
-        {
-            case 0xF0:
-                {
-                    int32_t len = 0;
-                    while (true)
-                    {
-                        uint8_t curByte = *trackPtr++;
-                        len = (len << 7) | (curByte & 0x7F);
-                        if ((curByte & 0x80) == 0) 
-                            break;
-                    }
-                    trackPtr += len;
-                }
-                continue;
-            case 0xF1: 
-                trackPtr += 1; 
-                continue;
-            case 0xF2: 
-                trackPtr += 2; 
-                continue;
-            case 0xF3: 
-                trackPtr += 1; 
-                continue;
-            case 0xFF:
-                readEvent = *trackPtr++;
-                int32_t len2 = 0;
-                
-                while (true)
-                {
-                    uint8_t curByte = *trackPtr++;
-                    len2 = (len2 << 7) | (curByte & 0x7F);
-                    if ((curByte & 0x80) == 0) 
-                        break;
-                }
-                if (readEvent == 0x2F)
-                {
-                    trackMaxTick = absolutetime;
-                    goto finalize;
-                }
-                else 
-                {
-                    trackPtr += len2;
-                }
-                continue;
-        }
-        if (lastTick != absolutetime && count > 0)
-        {
-            TickGroup group = {lastTick, notecount, count};
-            TickGroup_arr_push(tickgroup, group);
-            add(eventcount, count);
-            add(totalnotes, notecount);
-            //eventcount += count;
-            //totalnotes += notecount;
-            notecount = 0;
-            count = 0;
-        }
-        lastTick = absolutetime;
-        switch (status)
-        {
-            case 0x90:
-                trackPtr += 1;
-                if (*trackPtr++ != 0) 
+            if (readEvent < 0xF0)
+            {
+                prevEvent = readEvent;
+                if ((readEvent & 0xF0) == 0x90 && *(trackPtr + 1) != 0)
                     notecount++;
                 count++;
-                break;
-            case 0x80:
-            case 0xA0:
-            case 0xB0:
-            case 0xE0:
-                trackPtr += 2;
-                count++;
-                break;
-            case 0xC0:
-            case 0xD0:
-                trackPtr += 1;
-                count++;
-                break;
+                trackPtr += ((readEvent & 0xE0) == 0xC0) ? 1 : 2;
+            }
+            else
+            {
+                switch (readEvent)
+                {
+                    case 0xF0:
+                        {
+                            int32_t len = 0;
+                            while (true)
+                            {
+                                uint8_t curByte = *trackPtr++;
+                                len = (len << 7) | (curByte & 0x7F);
+                                if ((curByte & 0x80) == 0) 
+                                    break;
+                            }
+                            trackPtr += len;
+                        }
+                        continue;
+                    case 0xF1: 
+                        trackPtr += 1; 
+                        continue;
+                    case 0xF2: 
+                        trackPtr += 2; 
+                        continue;
+                    case 0xF3: 
+                        trackPtr += 1; 
+                        continue;
+                    case 0xFF:
+                        readEvent = *trackPtr++;
+                        if (readEvent != 0x2F)
+                        {
+                            int32_t len2 = 0;
+                            while (true)
+                            {
+                                uint8_t curByte = *trackPtr++;
+                                len2 = (len2 << 7) | (curByte & 0x7F);
+                                if ((curByte & 0x80) == 0) 
+                                    break;
+                            }
+                            trackPtr += len2;
+                        }
+                        else
+                        {
+                            trackMaxTick = absolutetime;
+                            goto finalize;
+                        }
+                        continue;
+                }        
+           }
+        }
+        else
+        {
+            if ((prevEvent & 0xF0) == 0x90 && *trackPtr != 0)
+                notecount++;
+            count++;
+            trackPtr += ((prevEvent & 0xE0) == 0xC0) ? 0 : 1;
         }
     }
-    puts("does this midi not have an end of track uint8_t? this message isnt supposed to appear otherwise");
+    puts("does this midi not have an end of track? this message isnt supposed to appear otherwise");
     finalize:
         if (absolutetime > 1 << 28)
             printf("\ndear lord what is wrong with your midi file's varlen. current tick = %d", absolutetime);
@@ -285,7 +276,7 @@ void countTrackEvents(uint8_t* trackPtr, uint8_t* trackEnd, TickGroup_arr* tickg
             maxTick = trackMaxTick;
         if (count > 0)
         {
-            TickGroup group = {lastTick, notecount, count};
+            TickGroup group = {absolutetime, notecount, count};
             TickGroup_arr_push(tickgroup, group);
             add(eventcount, count);
             add(totalnotes, notecount);
@@ -307,168 +298,134 @@ int64_t ParseTrackEvents(uint8_t* trackPtr, uint8_t* trackEnd, uint24_t* msgPtr,
     while (trackPtr < trackEnd)
     {
         // inline varlen decode
-        uint8_t b = *trackPtr++;
-        if ((b & 0x80) == 0)
-            absolutetime += b;
-        else
+        uint8_t delta = *trackPtr++;
+        if (delta >= 0x80)
         {
-            int delta = b & 0x7F;
+            delta &= 0x7F;
+            uint8_t b = 0;
             do 
             { 
-                b = *trackPtr++; 
+                b = *trackPtr++;
                 delta = (delta << 7) | (b & 0x7F); 
             } 
-            while ((b & 0x80) != 0);
-            absolutetime += delta;
+            while (b >= 0x80);
         }
         uint8_t readEvent = *trackPtr++;
-        if (readEvent < 0x80) 
-        { 
-            trackPtr--;
-            readEvent = prevEvent; 
-        }
-        
-        uint8_t status = (uint8_t)(readEvent & 0xF0);
-        if (readEvent >= 0x80 && readEvent < 0xF0)
-            prevEvent = readEvent;
-        switch (readEvent)
+        if (readEvent >= 0x80)
         {
-            case 0xF0:
+            if (readEvent < 0xF0)
             {
-                int size = 0;
-                while (true)
+                prevEvent = readEvent;
+                if ((readEvent & 0xE0) != 0xC0)
                 {
-                    uint8_t curByte = *trackPtr++;
-                    size = (size << 7) | (curByte & 0x7F);
-                    if ((curByte & 0x80) == 0) 
-                        break;
+                    uint8_t data1 = *trackPtr;
+                    uint8_t data2 = *(trackPtr + 1);
+                    if ((readEvent & 0xF0) == 0x90 && data2 != 0)
+                        notecount++;
+                    msgPtr[next_pos] = uint24_from(readEvent | (data1 << 8) | (data2 << 16));
                 }
-                uint8_t* data = malloc(size + 1);
-                data[0] = readEvent;
-                for (uint32_t i = 1; i < (uint32_t)(size + 1); i++)
-                    data[i] = *trackPtr++;
-                SysExEvent sex = {absolutetime, size + 1, data};
-                #ifdef _OPENMP
-                    #pragma omp critical
-                #endif
-                SysExEvent_arr_push(sysex, sex);
-                continue;
+                else
+                {
+                    uint8_t data1 = *(trackPtr);
+                    msgPtr[next_pos] = uint24_from(readEvent | (data1 << 8));
+                }
+                trackPtr += ((readEvent & 0xE0) == 0xC0) ? 1 : 2;
             }
-            case 0xF1:
-            { 
-                trackPtr += 1; 
-                continue;
-            }
-            case 0xF2:
-            { 
-                trackPtr += 2; 
-                continue;
-            }
-            case 0xF3: 
-            {    
-                trackPtr += 1; 
-                continue;
-            }
-            case 0xFF:
+            else
             {
-                readEvent = *trackPtr++;
-                if (readEvent == 0x51)
+                switch (readEvent)
                 {
-                    int len = 0;
-                    while (true)
+                    case 0xF0:
                     {
-                        uint8_t curByte = *trackPtr++;
-                        len = (len << 7) | (curByte & 0x7F);
-                        if ((curByte & 0x80) == 0) 
-                            break;
+                        int size = 0;
+                        while (true)
+                        {
+                            uint8_t curByte = *trackPtr++;
+                            size = (size << 7) | (curByte & 0x7F);
+                            if ((curByte & 0x80) == 0) 
+                                break;
+                        }
+                        uint8_t* data = malloc(size + 1);
+                        data[0] = readEvent;
+                        for (uint32_t i = 1; i < (uint32_t)(size + 1); i++)
+                            data[i] = *trackPtr++;
+                        SysExEvent sex = {absolutetime, size + 1, data};
+                        #ifdef _OPENMP
+                            #pragma omp critical
+                        #endif
+                        SysExEvent_arr_push(sysex, sex);
+                        continue;
                     }
-                    int32_t tempoVal = 0;
-                    for (int i = 0; i < len; i++) 
-                        tempoVal = (tempoVal << 8) | *trackPtr++;
-                    TempoEvent tev = {absolutetime, uint24_from(tempoVal)};
-                    #ifdef _OPENMP
-                        #pragma omp critical
-                    #endif
-                    TempoEvent_arr_push(tempo, tev);
-                }
-                else if (readEvent == 0x2F)
-                {
-                    return notecount;
-                }
-                else 
-                {
-                    int len = 0;
-                    while (true)
+                    case 0xF1:
+                    { 
+                        trackPtr += 1; 
+                        continue;
+                    }
+                    case 0xF2:
+                    { 
+                        trackPtr += 2; 
+                        continue;
+                    }
+                    case 0xF3: 
+                    {    
+                        trackPtr += 1; 
+                        continue;
+                    }
+                    case 0xFF:
                     {
-                        uint8_t curByte = *trackPtr++;
-                        len = (len << 7) | (curByte & 0x7F);
-                        if ((curByte & 0x80) == 0) 
-                            break;
+                        readEvent = *trackPtr++;
+                        if (readEvent == 0x51)
+                        {
+                            int len = 0;
+                            while (true)
+                            {
+                                uint8_t curByte = *trackPtr++;
+                                len = (len << 7) | (curByte & 0x7F);
+                                if ((curByte & 0x80) == 0) 
+                                    break;
+                            }
+                            int32_t tempoVal = 0;
+                            for (int i = 0; i < len; i++) 
+                                tempoVal = (tempoVal << 8) | *trackPtr++;
+                            TempoEvent tev = {absolutetime, uint24_from(tempoVal)};
+                            #ifdef _OPENMP
+                                #pragma omp critical
+                            #endif
+                            TempoEvent_arr_push(tempo, tev);
+                        }
+                        else if (readEvent == 0x2F)
+                        {
+                            return notecount;
+                        }
+                        else 
+                        {
+                            int len = 0;
+                            while (true)
+                            {
+                                uint8_t curByte = *trackPtr++;
+                                len = (len << 7) | (curByte & 0x7F);
+                                if ((curByte & 0x80) == 0) 
+                                    break;
+                            }
+                            trackPtr += len;
+                        }
+                        continue;
                     }
-                    trackPtr += len;
                 }
-                continue;
-                
             }
         }
-        switch (status)
+        else
         {
-            case 0x80:
+            if ((prevEvent & 0xE0) != 0xC0)
             {
-                uint8_t note = *trackPtr++; 
-                uint8_t vel = *trackPtr++;
-                msgPtr[next_pos] = uint24_from(readEvent | (note << 8) | (vel << 16));
-                break;
+                uint8_t data2 = *trackPtr++;
+                if ((prevEvent & 0xF0) == 0x90 && data2 != 0)
+                    notecount++;
+                msgPtr[next_pos] = uint24_from(prevEvent | (readEvent << 8) | (data2 << 16));
             }
-            case 0x90:
+            else
             {
-                uint8_t note = *trackPtr++;
-                uint8_t vel = *trackPtr++;
-                if (vel != 0)
-                { 
-                    notecount++; 
-                    msgPtr[next_pos] = uint24_from(readEvent | (note << 8) | (vel << 16));
-                }
-                else 
-                { 
-                    uint8_t channel = (uint8_t)(readEvent & 0x0F);
-                    uint8_t dummynoteoff = (uint8_t)(0x80 | channel);  
-                    msgPtr[next_pos] = uint24_from(dummynoteoff | (note << 8) | (64 << 16));
-                }
-                break;
-            }
-            case 0xA0: 
-            { 
-                uint8_t note = *trackPtr++;
-                uint8_t pressure = *trackPtr++; 
-                msgPtr[next_pos] = uint24_from(readEvent | (note << 8) | (pressure << 16));
-                break; 
-            }
-            case 0xB0: 
-            { 
-                uint8_t controller = *trackPtr++;
-                uint8_t val = *trackPtr++;      
-                msgPtr[next_pos] = uint24_from(readEvent | (controller << 8) | (val << 16));
-                break; 
-            }
-            case 0xC0: 
-            { 
-                uint8_t prog = *trackPtr++;                            
-                msgPtr[next_pos] = uint24_from(readEvent | (prog << 8));
-                break; 
-            }
-            case 0xD0: 
-            { 
-                uint8_t pres = *trackPtr++;                            
-                msgPtr[next_pos] = uint24_from(readEvent | (pres << 8));
-                break; 
-            }
-            case 0xE0: 
-            { 
-                uint8_t lsb = *trackPtr++; 
-                uint8_t msb = *trackPtr++;      
-                msgPtr[next_pos] = uint24_from(readEvent | (lsb << 8) | (msb << 16));
-                break; 
+                msgPtr[next_pos] = uint24_from(prevEvent | (readEvent << 8));
             }
         }
     }
@@ -480,7 +437,8 @@ int32_t LoadMIDI(uint8_t* filepath)
 {
     midiloaded = 0;
     printf("loading %s or something\n", filepath);
-    if (!InitMMF(filepath)) return midiloaded;
+    if (!InitMMF(filepath)) 
+        return midiloaded;
     VerifyHeader();
     maxTick = 0;
     trackProperties_arr tracks = {0};
@@ -588,7 +546,9 @@ void UnloadMIDI(void)
     free(sysexArr);
     free(tempoArr);
     free(eventArr);
+    free(timingArr);
     sysexArr = NULL;
     tempoArr = NULL;
     eventArr = NULL;
+    timingArr = NULL;
 }
