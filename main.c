@@ -20,6 +20,7 @@ int main(int32_t argc, char* argv[])
     {
         if(!Sound_Init(singlethread))
             return 1;
+        puts("CONTROLS:\nCtrl+C = Stop\nCtrl+Z = Pause (fg %1 to terminal to resume)");
         StartPlayback(singlethread);
         UnloadMIDI();
     }

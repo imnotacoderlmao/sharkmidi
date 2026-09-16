@@ -10,6 +10,8 @@
         uint32_t dwFlags;
     } MIDIHDR;
     typedef int32_t (*KDM_LSEND)(MIDIHDR* message, int32_t headersize);
+    extern KDM_LSEND KDMAPI_PrepareLongData;
+    extern KDM_LSEND KDMAPI_UnprepareLongData;
 #else
     typedef int32_t (*KDM_LSEND)(uint8_t* message, int32_t messagesize);
 #endif
@@ -24,8 +26,6 @@ extern KDM_INIT KDMAPI_ResetKDMAPIStream;
 extern KDM_DEBUG KDMAPI_GetVoiceCount;
 extern KDM_SEND KDMAPI_SendDirectData;
 extern KDM_LSEND KDMAPI_SendDirectLongData;
-extern KDM_LSEND KDMAPI_PrepareLongData;
-extern KDM_LSEND KDMAPI_UnprepareLongData;
 extern int32_t hasvoice;
 
 int32_t KDMAPI_Setup();

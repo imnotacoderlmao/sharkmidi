@@ -1,3 +1,4 @@
+#include "../misc/uint24.h"
 #ifndef SYNTH
 #define SYNTH
 
@@ -9,7 +10,6 @@
 #else
     extern int32_t (*SendDirectLongData)(uint8_t* message, int32_t messagesize);
 #endif
-#include "../misc/uint24.h"
 int32_t Sound_Init(int32_t singlethread);
 void AllNotesOFF(void);
 extern void (*SendDirectData)(uint32_t message);

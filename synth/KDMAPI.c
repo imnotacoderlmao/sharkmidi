@@ -8,7 +8,9 @@
     #define GET_FUNC(handle, name) GetProcAddress(handle, name)
     #define FREE_LIB(handle) FreeLibrary(handle)
     #define GET_ERROR() "Failed to load library or symbol"
-    typedef int32_t(*KDM_LSEND)(MIDIHDR* hdr, int32_t headersize);
+    typedef int32_t (*KDM_LSEND)(MIDIHDR *hdr, int32_t headersize);
+    KDM_LSEND KDMAPI_PrepareLongData;
+    KDM_LSEND KDMAPI_UnprepareLongData;
 #else
     #include <dlfcn.h>
     #define LIB_HANDLE void*
@@ -29,8 +31,6 @@ KDM_INIT KDMAPI_ResetKDMAPIStream;
 KDM_DEBUG KDMAPI_GetVoiceCount;
 KDM_SEND KDMAPI_SendDirectData;
 KDM_LSEND KDMAPI_SendDirectLongData;
-KDM_LSEND KDMAPI_PrepareLongData;
-KDM_LSEND KDMAPI_UnprepareLongData;
 int32_t hasvoice = 0;
 
 int32_t KDMAPI_Setup()
@@ -57,7 +57,7 @@ int32_t KDMAPI_Setup()
     if ((KDMAPI_ResetKDMAPIStream = (KDM_INIT)GET_FUNC(KDMAPI_libHandle, "ResetKDMAPIStream")) == NULL)
         {puts("[KDMAPI] GetProcAddress failed for ResetKDMAPIStream."); return 0;}
     if ((KDMAPI_GetVoiceCount = (KDM_DEBUG)GET_FUNC(KDMAPI_libHandle, "GetVoiceCount")) != NULL)
-        {puts("this omnimidi has voicecount enabled. outputting in playback stats"); hasvoice = 1; }
+        {puts("this omnimidi has voicecount enabled! outputting in playback stats"); hasvoice = 1; }
     puts("KDMAPI loaded!");
     return 1;
 }

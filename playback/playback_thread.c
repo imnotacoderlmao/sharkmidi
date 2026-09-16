@@ -2,18 +2,19 @@
 #include "timer.h"
 #include "../synth/sound.h"
 #include <stdio.h>
-#include <pthread.h>
 #include <stdint.h>
 #include <unistd.h>
 #include <string.h>
 int64_t playednotes = 0, playednotes2 = 0;
 int32_t current_clock = 0, frames = 0;
-double now = 0.0, last = 0.0;
+double now = 0.0, last = 0.0, laststatsupdate = 0;
 double bpm = 120.0;
 double tickscale = 0.0;
 double tick = 0.0;
 int32_t paused = 0, stopping = 0, skipping = 0;
-char sysex_str[64];
+double npshistory[60];
+int npshistoryidx = 0;
+double notespersec = 0;
 const double STALL_THRESH = 0.0166667;
 // oh god do i really have to abuse macros too
 #define MIN(a, b) (((a) < (b)) ? (a) : (b))
@@ -64,39 +65,32 @@ void SetBPM(uint24_t microsec)
 }
 
 
-void* PlaybackStats(void* arg)
+void UpdatePlaybackStats()
 {
-    printf("starting playback....");
-    double lastupdate = 0;
-    double notespersec = 0.0;
-    double midifps = 0;
-    while(!stopping)
-    {
-        double now = get_time();
-        double delta = now - lastupdate;
-        if (current_clock >= maxTick) 
-            stopping = 1;
-        if(delta > 0.1)
-        {
-            notespersec = (playednotes - playednotes2) / delta;
-            midifps = frames / delta;
-            playednotes2 = playednotes;
-            lastupdate = now;
-            frames = 0;
-        }
-        if(voicefetching)
-            printf("tick: %d / %d | played notes: %ld / %ld (%lf/s) | bpm: %lf | midi thread: %lf | %d voices        \r", current_clock, maxTick, playednotes, totalnotes, notespersec, bpm, midifps, GetVoiceCount());
-        else
-            printf("tick: %d / %d | played notes: %ld / %ld (%lf/s) | bpm: %lf | midi thread: %lf        \r", current_clock, maxTick, playednotes, totalnotes, notespersec, bpm, midifps);
-        
-        usleep(16 * 1000);
-    }
-    pthread_exit(NULL);
-    return NULL;
+    if ((get_time() - laststatsupdate) < 0.01666666)
+        return;
+    
+    if (current_clock >= maxTick) 
+        stopping = 1;
+
+    double midifps = 1 / (now - last);
+
+    npshistoryidx = (npshistoryidx + 1) % 60;
+    notespersec -= npshistory[npshistoryidx];
+    npshistory[npshistoryidx] = playednotes - playednotes2;
+    notespersec += npshistory[npshistoryidx];
+    playednotes2 = playednotes;
+
+    if(voicefetching)
+        printf("tick: %d / %d | played notes: %ld / %ld (%lf/s) | bpm: %lf | midi thread: %lf | %d voices        \r", current_clock, maxTick, playednotes, totalnotes, notespersec, bpm, midifps, GetVoiceCount());
+    else
+        printf("tick: %d / %d | played notes: %ld / %ld (%lf/s) | bpm: %lf | midi thread: %lf        \r", current_clock, maxTick, playednotes, totalnotes, notespersec, bpm, midifps);
+    laststatsupdate = get_time();
 }
 
 void SubmitSysEx(SysExEvent sysex)
 {
+    char sysex_str[64];
     size_t offset = 0;
     for(int32_t i = 0; i < sysex.size; i++)
         offset += snprintf(sysex_str + offset, 4, "%02X " , sysex.message[i]);
@@ -141,8 +135,6 @@ void StartPlayback(int singlethread)
     SysExEvent* sysex = sysexArr;
     current_clock = 0;
     size_t played = 0;
-    pthread_t stats_thread;
-    pthread_create(&stats_thread, NULL, PlaybackStats, NULL);
     clock_start();
     while(!stopping)
     {
@@ -187,6 +179,7 @@ void StartPlayback(int singlethread)
             else
                 played = timing->event_offset;
             playednotes += timing->notecount;
+            UpdatePlaybackStats();
             timing++;
         }
         while (tempo->tick <= clock)
@@ -202,6 +195,5 @@ void StartPlayback(int singlethread)
     }
     clock_start();
     current_clock = 0;
-    pthread_join(stats_thread, NULL);
     puts("\nPlayback finished...");
 }

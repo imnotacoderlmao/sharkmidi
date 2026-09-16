@@ -1,6 +1,6 @@
 # sharkmidi
 
-A C port of [SharpMIDI-Raylib](https://github.com/imnotacoderlmao/SharpMIDI-raylib) to leverage a smarter compiler
+A (currently incomplete) C port of [SharpMIDI-Raylib](https://github.com/imnotacoderlmao/SharpMIDI-raylib) to leverage a smarter compiler
 
 ## Quick info
 
@@ -12,7 +12,7 @@ midi files, i think
 
 ## Build Info
 
-Install [make](https://www.gnu.org/software/make/). then run make on the root dir. 
+Install [make](https://www.gnu.org/software/make/). then run make on the root dir.
 there is several arguments like multiprocessing, native cpu and wether you want to use clang or gcc for compiling
 
 ## Quirks
@@ -26,4 +26,5 @@ original SharpMIDI: EmK530
 maybe chatgpt and claude cause my brain still dosent work sometimes :sob:
 
 ## License
+
 [GNU GPLv3](https://choosealicense.com/licenses/gpl-3.0/)

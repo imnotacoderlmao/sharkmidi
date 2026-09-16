@@ -60,6 +60,7 @@ int32_t Sound_Init(int32_t singlethread)
         pthread_create(&audio_thread, NULL, audiothread, NULL);
         //pthread_join(audio_thread, NULL);
     }
+    printf("singlethread is %s.\n", singlethread? "TRUE" : "FALSE");
     return 1;
 }
 
