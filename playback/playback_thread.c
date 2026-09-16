@@ -32,6 +32,8 @@ void clock_start(void)
 
 double clock_getTick(void)
 {
+    if(paused) 
+        return tick;
     now = get_time();
     double delta = MIN(now - last, STALL_THRESH);
     last = now;
@@ -56,6 +58,17 @@ void clock_resume(void)
         last = clock_getTick();
         paused = 0;
     }
+}
+
+void clock_skip(double skiptick, int skipto)
+{
+    double tickafterskip = MAX(0, tick + skiptick);
+    if (skipto)
+    {
+        tick = skiptick;
+        return;
+    }
+    tick = tickafterskip;
 }
 
 void SetBPM(uint24_t microsec)

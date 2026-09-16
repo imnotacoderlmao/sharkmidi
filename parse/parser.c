@@ -324,9 +324,17 @@ int64_t ParseTrackEvents(uint8_t* trackPtr, uint8_t* trackEnd, uint24_t* msgPtr,
                 {
                     uint8_t data1 = *trackPtr++;
                     uint8_t data2 = *trackPtr++;
-                    if ((readEvent & 0xF0) == 0x90 && data2 != 0)
-                        notecount++;
-                    msgPtr[next_pos] = uint24_from(readEvent | (data1 << 8) | (data2 << 16));
+                    if ((readEvent & 0xF0) == 0x90)
+                    {
+                        if(data2 != 0)
+                            notecount++;
+                        else 
+                        {
+                            msgPtr[next_pos] = uint24_from(0x80 | (readEvent & 0x0F) | (data1 << 8) | (64 << 16));
+                            continue;
+                        }
+                    }
+                        msgPtr[next_pos] = uint24_from(readEvent | (data1 << 8) | (data2 << 16));
                 }
                 else
                 {
@@ -422,8 +430,13 @@ int64_t ParseTrackEvents(uint8_t* trackPtr, uint8_t* trackEnd, uint24_t* msgPtr,
             if ((prevEvent & 0xE0) != 0xC0)
             {
                 uint8_t data2 = *trackPtr++;
-                if ((prevEvent & 0xF0) == 0x90 && data2 != 0)
+                if(data2 != 0)
                     notecount++;
+                else 
+                {
+                    msgPtr[next_pos] = uint24_from(0x80 | (prevEvent & 0x0F) | (readEvent << 8) | (64 << 16));
+                    continue;
+                }
                 msgPtr[next_pos] = uint24_from(prevEvent | (readEvent << 8) | (data2 << 16));
             }
             else
