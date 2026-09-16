@@ -17,6 +17,7 @@ void (*SendDirectData)(uint32_t message);
 int32_t (*GetVoiceCount)(void);
 uint24_t* ringbuffer = NULL;
 int32_t voicefetching = 0;
+int issynthinitiated = 0;
 volatile uint32_t writeptr = 0;
 volatile uint32_t readptr = 0;
 const uint32_t RINGBUFFER_SIZE = 8388608;
@@ -61,6 +62,7 @@ int32_t Sound_Init(int32_t singlethread)
         //pthread_join(audio_thread, NULL);
     }
     printf("singlethread is %s.\n", singlethread? "TRUE" : "FALSE");
+    issynthinitiated = 1;
     return 1;
 }
 

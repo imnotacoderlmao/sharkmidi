@@ -91,7 +91,7 @@ static int isInitialized = 0;
 int WindowTicks = 2000;
 int RingCap = 0;
 int NotesDrawnLastFrame = 0;
-int UseForceCull = 0;
+int UseForceCull = 1;
 int EnableGlow = 1;
 int EnableTransparency = 0;
 
@@ -388,7 +388,7 @@ static void sweep_range(int fromTick, int toTick)
     TickGroup* group = timingArr;
     uint8_t* messages = (uint8_t*)eventArr;
     //uint8_t* tracks = trackArr; // NULL for now
-    uint8_t* tracks = NULL;
+    uint8_t* tracks = trackArr;
 
     int from = fromTick < maxTick ? fromTick : maxTick;
     int limit = toTick < maxTick ? toTick : maxTick;

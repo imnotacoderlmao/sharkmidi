@@ -2,6 +2,7 @@
 #include <stddef.h>
 TickGroup* timingArr = NULL;
 uint24_t* eventArr = NULL;
+uint8_t* trackArr = NULL;
 SysExEvent* sysexArr = NULL;
 TempoEvent* tempoArr = NULL;
 uint64_t totalnotes = 0;

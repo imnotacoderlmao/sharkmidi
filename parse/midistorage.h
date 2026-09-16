@@ -25,6 +25,7 @@ typedef struct
 
 extern TickGroup* timingArr;
 extern uint24_t* eventArr;
+extern uint8_t* trackArr;
 extern SysExEvent* sysexArr;
 extern TempoEvent* tempoArr;
 extern uint64_t totalnotes;

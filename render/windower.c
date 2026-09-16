@@ -22,6 +22,7 @@ static void spawn_playback_thread(int singlethread)
 #else
 #include <pthread.h>
 static pthread_t playbackThread;
+static int singlethread = 1;
 static void* playback_thread_entry(void* arg)
 {
     StartPlayback((int)(intptr_t)arg);
@@ -42,31 +43,59 @@ static void glfw_error_callback(int code, const char* desc)
 
 static void key_callback(GLFWwindow* w, int key, int scancode, int action, int mods)
 {
-    if (action != GLFW_PRESS) return;
-    switch (key)
+    if (action == GLFW_PRESS)
     {
-        case GLFW_KEY_ESCAPE:
+        if (key == GLFW_KEY_ESCAPE)
             glfwSetWindowShouldClose(w, GLFW_TRUE);
-            break;
-        case GLFW_KEY_SPACE:
-            if (paused) clock_resume(); else clock_pause();
-            break;
-        case GLFW_KEY_RIGHT:
-            clock_skip(tickscale, 0);
-            break;
-        case GLFW_KEY_LEFT:
-            clock_skip(tickscale * -1, 0);
-            break;
-        case GLFW_KEY_UP:
-            WindowTicks *= 1.1;
-            break;
-        case GLFW_KEY_DOWN:
-            WindowTicks /= 1.1;
-            break;
+        if (key == GLFW_KEY_SPACE)
+        {
+            if (stopping)
+            {
+                if(!issynthinitiated) 
+                    Sound_Init(singlethread);
+                spawn_playback_thread(singlethread);
+            }
+            else
+                clock_pause();
+        }
+        if (key == GLFW_KEY_U)
+        {
+            stopping = 1;    
+            UnloadMIDI();
+        }
+        if (key == GLFW_KEY_R)
+            stopping = 1;
+    }
+    if (key == GLFW_KEY_RIGHT)
+        clock_skip(tickscale, 0);
+
+    if (key == GLFW_KEY_LEFT)
+        clock_skip(tickscale * -1, 0);
+
+    if (key == GLFW_KEY_UP)
+        WindowTicks /= 1.1;
+
+    if (key == GLFW_KEY_DOWN)
+        WindowTicks *= 1.1;   
+}
+
+void drop_callback(GLFWwindow* w, int count, const char** paths)
+{
+    if (count == 1)
+        LoadMIDI(paths[0]);
+    else
+    {
+        puts("playlist playback not yet implemented!!!!!");
+        /*for (int i = 0; i < count && stopping; i++)
+        {
+            LoadMIDI(paths[i]);
+            if (!spawn_playback_thread(1))
+                UnloadMIDI();
+        }*/
     }
 }
 
-int Window_Init(int width, int height, const char* title)
+int Window_Init()
 {
     glfwSetErrorCallback(glfw_error_callback);
     if (!glfwInit())
@@ -75,15 +104,14 @@ int Window_Init(int width, int height, const char* title)
         return 0;
     }
 
-    // requesting exactly the 4.2 core floor the renderer targets
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 2);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
 #ifdef __APPLE__
-    glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GLFW_TRUE); // note: macOS caps at 4.1 regardless, see caveat below
+    glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GLFW_TRUE);
 #endif
 
-    win = glfwCreateWindow(width, height, title, NULL, NULL);
+    win = glfwCreateWindow(1280, 720, "sharkmidi", NULL, NULL);
     if (!win)
     {
         fprintf(stderr, "glfwCreateWindow failed\n");
@@ -92,7 +120,7 @@ int Window_Init(int width, int height, const char* title)
     }
 
     glfwMakeContextCurrent(win);
-    glfwSwapInterval(1); // vsync; set 0 if you want to test uncapped throughput
+    glfwSwapInterval(0);
 
     if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress))
     {
@@ -112,17 +140,15 @@ int Window_Init(int width, int height, const char* title)
 void Window_Run(char* filepath)
 {
     Renderer_Init();
-
-    // TODO: replace with real file selection once a GUI exists
-    if (LoadMIDI(filepath))
+    
+    if (filepath != NULL && LoadMIDI(filepath))
     {
-        Renderer_InitForMIDI();
-        Sound_Init(1);
-        spawn_playback_thread(1); // 0 = multithreaded audio path (ring buffer), 1 = singlethread direct-send
+        Sound_Init(singlethread);
+        spawn_playback_thread(singlethread);
     }
 
-    const int PAD = 20; // placeholder until a real layout/GUI exists
-
+    const int PAD = 20; // placeholder until an actual gui exists
+    glfwSetDropCallback(win, drop_callback);
     while (!glfwWindowShouldClose(win))
     {
         int fbWidth, fbHeight;
@@ -137,7 +163,7 @@ void Window_Run(char* filepath)
         glfwPollEvents();
     }
 
-    stopping = 1; // signal playback_thread's loop to exit
+    stopping = 1;
 #if defined(_WIN32) || defined(_WIN64)
     WaitForSingleObject(playbackThread, 1000);
 #else

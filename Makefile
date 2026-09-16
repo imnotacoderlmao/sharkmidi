@@ -23,7 +23,8 @@ ifeq (${clang},true)
     CC = clang
 endif
 
-SRCS = $(wildcard *.c) $(wildcard parse/*.c) $(wildcard playback/*.c) $(wildcard synth/*.c) $(wildcard render/*.c) $(wildcard third_party/glad/src/*.c)
+SRCS = $(wildcard *.c) $(wildcard parse/*.c) $(wildcard playback/*.c) $(wildcard synth/*.c) $(wildcard render/*.c) $(wildcard third_party/glad/src/*.c) $(wildcard third_party/*.c)
+
 
 OBJS = $(patsubst %.c, build/%.o, $(SRCS))
 TARGET = build/test.out

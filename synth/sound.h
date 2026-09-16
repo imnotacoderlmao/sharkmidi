@@ -13,6 +13,7 @@
 int32_t Sound_Init(int32_t singlethread);
 void AllNotesOFF(void);
 extern void (*SendDirectData)(uint32_t message);
+extern int issynthinitiated;
 extern int32_t (*GetVoiceCount)(void);
 extern uint24_t* ringbuffer;
 extern int32_t voicefetching;

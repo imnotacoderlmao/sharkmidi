@@ -1,9 +1,8 @@
 #include <stdint.h>
 void StartPlayback(int32_t singlethread);
-extern int32_t stopping;
+extern volatile int stopping;
 extern int32_t current_clock;
-extern int32_t paused;
-extern double tickscale;
+extern volatile int paused;
+extern volatile double tickscale;
 void clock_pause(void);
-void clock_resume(void);
 void clock_skip(double skiptick, int skipto);

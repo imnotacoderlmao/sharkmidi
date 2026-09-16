@@ -1,20 +1,24 @@
 #include "../parse/midistorage.h"
+#include "../parse/parser.h"
 #include "timer.h"
 #include "../synth/sound.h"
+#include "../third_party/conmidi_digit_formatter.h"
 #include <stdio.h>
 #include <stdint.h>
 #include <unistd.h>
 #include <string.h>
 int64_t playednotes = 0, playednotes2 = 0;
-int32_t current_clock = 0, frames = 0;
+int32_t current_clock = 0;
 double now = 0.0, last = 0.0, laststatsupdate = 0;
 double bpm = 120.0;
+volatile double delta = 0.0;
 double tickscale = 0.0;
-double tick = 0.0;
-int32_t paused = 0, stopping = 0, skipping = 0;
-double npshistory[60];
+volatile double tick = 0.0;
+volatile int paused = 0, stopping = 1;
+int skipping = 0;
+int64_t npshistory[60];
 int npshistoryidx = 0;
-double notespersec = 0;
+int64_t notespersec = 0;
 const double STALL_THRESH = 0.0166667;
 // oh god do i really have to abuse macros too
 #define MIN(a, b) (((a) < (b)) ? (a) : (b))
@@ -32,12 +36,15 @@ void clock_start(void)
 
 double clock_getTick(void)
 {
-    if(paused) 
+    if (paused)
+    {
+        usleep(1000);
         return tick;
+    }
     now = get_time();
-    double delta = MIN(now - last, STALL_THRESH);
+    delta = now - last;
     last = now;
-    tick += delta * tickscale;
+    tick += MIN(delta, STALL_THRESH) * tickscale;
     return tick;
 }
 
@@ -49,13 +56,9 @@ void clock_pause(void)
         paused = 1;
         AllNotesOFF();
     }
-}
-
-void clock_resume(void)
-{
-    if(paused)
+    else 
     {
-        last = clock_getTick();
+        last = get_time();
         paused = 0;
     }
 }
@@ -80,13 +83,13 @@ void SetBPM(uint24_t microsec)
 
 void UpdatePlaybackStats()
 {
-    if ((get_time() - laststatsupdate) < 0.01666666)
-        return;
-    
     if (current_clock >= maxTick) 
         stopping = 1;
+    
+    if ((get_time() - laststatsupdate) < 0.01666666)
+        return;
 
-    double midifps = 1 / (now - last);
+    double midifps = 1 / delta;
 
     npshistoryidx = (npshistoryidx + 1) % 60;
     notespersec -= npshistory[npshistoryidx];
@@ -95,9 +98,9 @@ void UpdatePlaybackStats()
     playednotes2 = playednotes;
 
     if(voicefetching)
-        printf("tick: %d / %d | played notes: %ld / %ld (%lf/s) | bpm: %lf | midi thread: %lf | %d voices        \r", current_clock, maxTick, playednotes, totalnotes, notespersec, bpm, midifps, GetVoiceCount());
+        printf("tick: %s / %s | played notes: %s / %s (%s/s) | bpm: %.2lf | midi thread: %s | %d voices        \r", AddCommas(current_clock), AddCommas(maxTick), AddCommas(playednotes), AddCommas(totalnotes), AddCommas(notespersec), bpm, AddCommas((int64_t)midifps), GetVoiceCount());
     else
-        printf("tick: %d / %d | played notes: %ld / %ld (%lf/s) | bpm: %lf | midi thread: %lf        \r", current_clock, maxTick, playednotes, totalnotes, notespersec, bpm, midifps);
+        printf("tick: %s / %s | played notes: %s / %s (%s/s) | bpm: %.2lf | midi thread: %s        \r", AddCommas(current_clock), AddCommas(maxTick), AddCommas(playednotes), AddCommas(totalnotes), AddCommas(notespersec), bpm, AddCommas((int64_t)midifps));
     laststatsupdate = get_time();
 }
 
@@ -105,8 +108,9 @@ void SubmitSysEx(SysExEvent sysex)
 {
     char sysex_str[64];
     size_t offset = 0;
-    for(int32_t i = 0; i < sysex.size; i++)
-        offset += snprintf(sysex_str + offset, 4, "%02X " , sysex.message[i]);
+    offset += snprintf(sysex_str + offset, 3, "%02X" , sysex.message[0]);
+    for(int32_t i = 1; i < sysex.size; i++)
+        offset += snprintf(sysex_str + offset, 4, "-%02X" , sysex.message[i]);
     printf("\nSending Sysex Message: %s", sysex_str);
     #if defined(_WIN32) || defined(_WIN64)
         MIDIHDR header = 
@@ -140,6 +144,11 @@ void SubmitSysEx(SysExEvent sysex)
 
 void StartPlayback(int singlethread)
 {
+    if (!midiloaded)
+    {
+        puts("no midi loaded!!!!!!!");
+        return;
+    }
     stopping = 0;
     playednotes = 0, playednotes2 = 0;
     uint24_t* eventptr = eventArr;
@@ -152,7 +161,6 @@ void StartPlayback(int singlethread)
     while(!stopping)
     {
         int32_t clock = (int32_t)clock_getTick();
-        frames++;
         if (current_clock > clock)
         {
             while (timing->tick > clock && clock > 0)
@@ -207,6 +215,7 @@ void StartPlayback(int singlethread)
         }
     }
     clock_start();
+    AllNotesOFF();
     current_clock = 0;
     puts("\nPlayback finished...");
 }
