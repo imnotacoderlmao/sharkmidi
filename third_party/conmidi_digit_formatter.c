@@ -1,38 +1,29 @@
-#include <stdlib.h>
 #include <stdint.h>
-static int count_digits(int64_t n) {
-    int digits = 1;
-    while (n >= 10) {
-        n /= 10;
-        digits++;
-    }
-    return digits;
-}
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
-char* AddCommas(int64_t num) {
-    int digits = count_digits(num);
-    int commas = (digits - 1) / 3;
-    int len_with_commas = digits + commas;
+char* AddCommas(int64_t n) {
+    char temp[50];
+    sprintf(temp, "%ld", n);
 
-    char* result = (char*)malloc(len_with_commas + 1);
+    int len = strlen(temp);
+    int commas = (len - 1) / 3;
+    int new_len = len + commas;
+    char* output = malloc((new_len + 1) * sizeof(char));
+    output[new_len] = '\0';
 
-    result[len_with_commas] = '\0';
-
-    int i = digits - 1;
-    int j = len_with_commas - 1;
-    int k = 0;
+    int i = len - 1;
+    int j = new_len - 1;
+    int count = 0;
 
     while (i >= 0) {
-        unsigned long long digit = num % 10;
-        num /= 10;
-        result[j--] = '0' + (char)digit;
-        k++;
-        if (k == 3 && i != 0) {
-            result[j--] = ',';
-            k = 0;
+        if (count == 3 && temp[i] != '-') {
+            output[j--] = ',';
+            count = 0;
         }
-        i--;
+        output[j--] = temp[i--];
+        count++;
     }
-
-    return result;
+    return output;
 }

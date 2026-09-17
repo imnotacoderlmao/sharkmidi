@@ -5,7 +5,6 @@
 #include "../third_party/conmidi_digit_formatter.h"
 #include <stdio.h>
 #include <stdint.h>
-#include <unistd.h>
 #include <string.h>
 int64_t playednotes = 0, playednotes2 = 0;
 int32_t current_clock = 0;
@@ -38,7 +37,7 @@ double clock_getTick(void)
 {
     if (paused)
     {
-        usleep(1000);
+        os_sleep_ms(1);
         return tick;
     }
     now = get_time();
@@ -129,7 +128,7 @@ void SubmitSysEx(SysExEvent sysex)
             if (send == 0)
             {
                 while (UnprepareLongData(&header, size) == 65) // MIDIERR_STILLPLAYING
-                    sleep(1);
+                    os_sleep_ms(1);
                 unprepare = 0;
             }
         }
@@ -141,6 +140,12 @@ void SubmitSysEx(SysExEvent sysex)
             printf("sysex send returned (%d)", send);
     #endif
 }
+
+enum playbackargs
+{
+    SINGLE_THREADED,
+    IS_PLAYLIST
+};
 
 void StartPlayback(int singlethread)
 {
@@ -174,7 +179,7 @@ void StartPlayback(int singlethread)
             while (sysex->tick > clock && sysex > sysexArr)
                 sysex--;
         }
-        while (timing->tick < clock)
+        while (timing->tick <= clock)
         {
             current_clock = timing->tick;
             if (!skipping)
@@ -216,6 +221,8 @@ void StartPlayback(int singlethread)
     }
     clock_start();
     AllNotesOFF();
+    uint8_t rolandreset[] = {0xF0, 0x41, 0x10, 0x42, 0x12, 0x40, 0x00, 0x7F, 0x00, 0x41, 0xF7};
+    SubmitSysEx((SysExEvent){0, 11, rolandreset});
     current_clock = 0;
     puts("\nPlayback finished...");
 }

@@ -53,6 +53,7 @@ int32_t Sound_Init(int32_t singlethread)
         PrepareLongData = KDMAPI_PrepareLongData;
         UnprepareLongData = KDMAPI_UnprepareLongData;
     #endif
+    printf("singlethread is %s.\n", singlethread? "TRUE" : "FALSE");
     if(hasvoice)
         voicefetching = 1;
     if(!singlethread)
@@ -60,8 +61,8 @@ int32_t Sound_Init(int32_t singlethread)
         ringbuffer = (uint24_t*)calloc(RINGBUFFER_SIZE, sizeof(uint24_t));
         pthread_create(&audio_thread, NULL, audiothread, NULL);
         //pthread_join(audio_thread, NULL);
+        puts("audio thread active");
     }
-    printf("singlethread is %s.\n", singlethread? "TRUE" : "FALSE");
     issynthinitiated = 1;
     return 1;
 }

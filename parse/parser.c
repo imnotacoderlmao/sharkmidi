@@ -2,8 +2,8 @@
 #include "midistorage.h"
 #include "../misc/typed-array.h"
 #include "../playback/timer.h"
-#include "../render/renderer.h"
 #include "../playback/playback_thread.h"
+#include "../third_party/conmidi_digit_formatter.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <fcntl.h>
@@ -13,7 +13,7 @@
 #include <stdatomic.h>
 #if defined(_WIN32) || defined(_WIN64)
 #include <windows.h>
-#define _stat64 stat;
+#include <io.h>
 void* mmap_wrapper(void* addr, size_t length, int fd, off_t offset) 
 {
     HANDLE hFile = (HANDLE)_get_osfhandle(fd);
@@ -22,7 +22,8 @@ void* mmap_wrapper(void* addr, size_t length, int fd, off_t offset)
     CloseHandle(hMap);
     return pView;
 }
-int munmap(void* addr, size_t length) {
+int munmap(void* addr, size_t length) 
+{
     return UnmapViewOfFile(addr) ? 0 : -1;
 }
 #else
@@ -142,7 +143,7 @@ static int cmp_sysex(const void* a, const void* b)
     return (posa > posb) - (posa < posb);
 }
 
-int32_t InitMMF(const char* filepath)
+int InitMMF(const char* filepath)
 {
     int filedesc = open(filepath, O_RDONLY);
     if (fstat(filedesc, &filestat) == -1)
@@ -158,6 +159,23 @@ int32_t InitMMF(const char* filepath)
     printf("successfully initiated memory mapped file with %lu bytes in size\n", fileLen);
     return 1;
 }
+
+/*int __attribute__((noinline)) varlendecode_noinline(uint8_t* trackptr)
+{
+    int32_t delta = *trackptr++;
+    if (delta >= 0x80)
+    {
+        delta &= 0x7F;
+        uint8_t b = 0;
+        do 
+        { 
+            b = *trackptr++;
+            delta = (delta << 7) | (b & 0x7F); 
+        } 
+        while (b >= 0x80);
+    }
+    return delta;
+}*/
 
 int64_t CountTrackEvents(uint8_t* trackPtr, uint8_t* trackEnd, TickGroup_arr* tickgroup)
 {
@@ -457,8 +475,9 @@ int64_t ParseTrackEvents(uint8_t* trackPtr, uint8_t* trackEnd, uint24_t* msgPtr,
     return notecount;
 }
 
-int32_t LoadMIDI(const char* filepath)
+int LoadMIDI(const char* filepath)
 {
+    UnloadMIDI();
     midiloaded = 0;
     printf("loading %s or something\n", filepath);
     if (!InitMMF(filepath)) 
@@ -517,11 +536,9 @@ int32_t LoadMIDI(const char* filepath)
         timingArr[t].event_offset = offset;
         offset += cnt;
     }
-    // sentinel
-    timingArr[maxTick + 1] = (TickGroup){INT32_MAX, totalnotes, eventcount};
-    start = get_time();
     loadedtracks = 0;
     totalnotes = 0;
+    start = get_time();
     #ifdef _OPENMP
         #pragma omp parallel for
     #endif
@@ -533,14 +550,14 @@ int32_t LoadMIDI(const char* filepath)
         add(loadedtracks, 1);
         printf("(%d/%d) tracks parsed, %ld notes parsed\r", loadedtracks, trackAmount, totalnotes);
     }
-    
-    // sentinel part 2
+    end = get_time();    
+    // sentinels
+    timingArr[maxTick + 1] = (TickGroup){INT32_MAX, totalnotes, eventcount};
     TempoEvent tev = {INT32_MAX, uint24_from(500000)};
     TempoEvent_arr_push(&tempos, tev);
     SysExEvent sex = {INT32_MAX};
     SysExEvent_arr_push(&sysexs, sex);
 
-    end = get_time();
     parsetime = end - start;
     qsort(tempos.data, tempos.count, sizeof(TempoEvent), cmp_tempo);
     qsort(sysexs.data, sysexs.count, sizeof(SysExEvent), cmp_sysex);
@@ -548,21 +565,21 @@ int32_t LoadMIDI(const char* filepath)
     sysexArr = sysexs.data;
     tempoCount = tempos.count;
     sysexCount = sysexs.count;
-    printf("\nparsed in %lf seconds. which is %lf notes/sec.\nMIDI Stats below\nNotecount: %ld notes from %d tracks\nLength: %d ticks\nPPQ: %d\nplayback is ready\n", parsetime, (double)(totalnotes/parsetime), totalnotes, trackAmount, maxTick, ppq);
+    printf(
+        "\nparsed in %lf seconds. which is %s notes/sec.\nMIDI Stats below\nNotecount: %s notes from %s tracks\nLength: %s ticks\nPPQ: %s\nplayback is ready\n", parsetime, 
+        AddCommas((double)(totalnotes/parsetime)), AddCommas(totalnotes), AddCommas(trackAmount), AddCommas(maxTick), AddCommas(ppq));
     free(writeCursors);
     writeCursors = NULL;
     trackProperties_arr_free(&tracks);
     munmap(filePtr, filestat.st_size);
     filePtr = NULL;
     midiloaded = 1;
-    Renderer_InitForMIDI();
     return midiloaded;
 }
 
 void UnloadMIDI(void)
 {
     if (!midiloaded) return;
-    Renderer_ResetForUnload();
     stopping = 1;
     midiloaded = 0;
     trackAmount = 0;
@@ -579,4 +596,5 @@ void UnloadMIDI(void)
     tempoArr = NULL;
     eventArr = NULL;
     timingArr = NULL;
+    puts("successfully freed midi");
 }

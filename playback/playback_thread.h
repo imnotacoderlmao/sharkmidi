@@ -1,5 +1,5 @@
 #include <stdint.h>
-void StartPlayback(int32_t singlethread);
+void StartPlayback(int singlethread);
 extern volatile int stopping;
 extern int32_t current_clock;
 extern volatile int paused;
