@@ -11,29 +11,6 @@
 #include <sys/stat.h>
 #include <string.h>
 #include <stdatomic.h>
-#if defined(_WIN32) || defined(_WIN64)
-#include <windows.h>
-#include <io.h>
-void* mmap_wrapper(void* addr, size_t length, int fd, off_t offset) 
-{
-    HANDLE hFile = (HANDLE)_get_osfhandle(fd);
-    HANDLE hMap = CreateFileMapping(hFile, NULL, PAGE_READONLY, 0, 0, NULL);
-    void* pView = MapViewOfFile(hMap, FILE_MAP_READ, 0, 0, 0);
-    CloseHandle(hMap);
-    return pView;
-}
-int munmap(void* addr, size_t length) 
-{
-    return UnmapViewOfFile(addr) ? 0 : -1;
-}
-#else
-#include <sys/mman.h>
-void* mmap_wrapper(void* addr, size_t length, int fd, off_t offset)
-{
-    return mmap(addr, length, PROT_READ, MAP_PRIVATE, fd, 0);
-}
-#endif
-
 
 #ifdef _OPENMP
     #include <omp.h>
@@ -64,6 +41,53 @@ DEFINE_ARRAY(trackProperties);
 DEFINE_ARRAY(TickGroup);
 DEFINE_ARRAY(TempoEvent);
 DEFINE_ARRAY(SysExEvent);
+
+#if defined(_WIN32) || defined(_WIN64)
+#include <windows.h>
+int munmap(void* addr, size_t length) 
+{
+    return UnmapViewOfFile(addr)? 0 : -1;
+}
+int InitMMF(const char* filepath)
+{
+    HANDLE filehandle = CreateFileA(filepath, GENERIC_READ, FILE_SHARE_READ,
+        NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    LARGE_INTEGER fileSize;
+    GetFileSizeEx(filehandle, &fileSize);
+    if (filehandle == INVALID_HANDLE_VALUE)
+    {
+        puts("error getting file properties, does the file even exist?");
+        CloseHandle(filehandle);
+        return 0;
+    }
+    HANDLE mapfilehandle = CreateFileMapping(filehandle, NULL, PAGE_READONLY, 0, 0, NULL);
+    CloseHandle(filehandle);
+    fileLen = fileSize.QuadPart;
+    filePos = 0;
+    filePtr = MapViewOfFile(mapfilehandle, FILE_MAP_READ, 0, 0, 0);
+    CloseHandle(mapfilehandle);
+    printf("successfully initiated memory mapped file with %lu bytes in size\n", fileLen);
+    return 1;
+}
+#else
+#include <sys/mman.h>
+int InitMMF(const char* filepath)
+{
+    int filedesc = open(filepath, O_RDONLY);
+    if (fstat(filedesc, &filestat) == -1)
+    {
+        puts("error getting filesize, does the file even exist?");
+        close(filedesc);
+        return 0;
+    }
+    fileLen = filestat.st_size;
+    filePos = 0;
+    filePtr = mmap(NULL, filestat.st_size, PROT_READ, MAP_PRIVATE, filedesc, 0);
+    close(filedesc);
+    printf("successfully initiated memory mapped file with %lu bytes in size\n", fileLen);
+    return 1;
+}
+#endif
 
 static uint32_t ReadUInt32(void)
 {
@@ -141,23 +165,6 @@ static int cmp_sysex(const void* a, const void* b)
     int32_t posa = ((const SysExEvent*)a)->tick;
     int32_t posb = ((const SysExEvent*)b)->tick;
     return (posa > posb) - (posa < posb);
-}
-
-int InitMMF(const char* filepath)
-{
-    int filedesc = open(filepath, O_RDONLY);
-    if (fstat(filedesc, &filestat) == -1)
-    {
-        puts("error getting filesize, does the file even exist?");
-        close(filedesc);
-        return 0;
-    }
-    fileLen = filestat.st_size;
-    filePos = 0;
-    filePtr = mmap_wrapper(NULL, filestat.st_size, filedesc, 0);
-    close(filedesc);
-    printf("successfully initiated memory mapped file with %lu bytes in size\n", fileLen);
-    return 1;
 }
 
 /*int __attribute__((noinline)) varlendecode_noinline(uint8_t* trackptr)

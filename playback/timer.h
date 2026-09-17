@@ -6,6 +6,7 @@ static inline double get_time(void)
     return ts.tv_sec + ts.tv_nsec * 1e-9;  // seconds
 }
 #if defined(_WIN32) || defined(_WIN64)
+#include <windows.h>
 static void os_sleep_ms(int ms) { Sleep(ms); }
 #else
 static void os_sleep_ms(int ms) 
