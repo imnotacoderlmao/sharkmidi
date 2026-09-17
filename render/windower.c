@@ -192,7 +192,7 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
         WindowTicks /= 1.1;
 
     if (key == GLFW_KEY_DOWN)
-        WindowTicks *= 1.1;   
+        WindowTicks = (WindowTicks * 1.1) + 1;   
     
     if (key == GLFW_KEY_R)
         stopping = 1;

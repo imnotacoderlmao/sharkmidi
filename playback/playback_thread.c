@@ -156,6 +156,10 @@ void StartPlayback(int singlethread)
     }
     stopping = 0;
     playednotes = 0, playednotes2 = 0;
+    if (!singlethread)
+    {
+        audiothread_entry();
+    }
     uint24_t* eventptr = eventArr;
     TickGroup* timing = timingArr;
     TempoEvent* tempo = tempoArr;

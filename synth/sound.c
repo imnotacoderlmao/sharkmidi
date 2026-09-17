@@ -26,6 +26,8 @@ pthread_t audio_thread;
 
 void* audiothread(void* args)
 {
+    ringbuffer = (uint24_t*)calloc(RINGBUFFER_SIZE, sizeof(uint24_t));
+    readptr = 0;
     puts("audio thread intialized");
     while(!stopping)
     {
@@ -37,8 +39,13 @@ void* audiothread(void* args)
         }
     }
     free(ringbuffer);
-    pthread_exit(NULL);
+    ringbuffer = NULL;
     return NULL;
+}
+
+void audiothread_entry(void)
+{
+    pthread_create(&audio_thread, NULL, audiothread, NULL);
 }
 
 int32_t Sound_Init(int32_t singlethread) 
@@ -56,13 +63,6 @@ int32_t Sound_Init(int32_t singlethread)
     printf("singlethread is %s.\n", singlethread? "TRUE" : "FALSE");
     if(hasvoice)
         voicefetching = 1;
-    if(!singlethread)
-    {
-        ringbuffer = (uint24_t*)calloc(RINGBUFFER_SIZE, sizeof(uint24_t));
-        pthread_create(&audio_thread, NULL, audiothread, NULL);
-        //pthread_join(audio_thread, NULL);
-        puts("audio thread active");
-    }
     issynthinitiated = 1;
     return 1;
 }
