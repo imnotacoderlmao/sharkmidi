@@ -539,12 +539,11 @@ void Renderer_Render(int screenWidth, int screenHeight, int32_t tick, int pad)
     {
         float yStep = (yTop - yBottom) / 128.0f;
         glUseProgram(lineShader);
-
         glUniform3f(u_metrics, pixelsPerTick, yBottom, yStep);
         glUniform1i(u_viewStart, viewStart);
         glUniform1i(u_viewEnd, viewEnd);
-        glUniform1i(u_glowEnabled, EnableGlow ? 1 : 0);
-        glUniform1i(u_transparencyEnabled, EnableTransparency ? 1 : 0);
+        glUniform1i(u_glowEnabled, EnableGlow);
+        glUniform1i(u_transparencyEnabled, EnableTransparency);
         glUniform1i(u_currentTick, tick);
 
         glActiveTexture(GL_TEXTURE0);

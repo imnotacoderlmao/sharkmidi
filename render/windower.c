@@ -192,6 +192,10 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
             Renderer_ResetForUnload();
             UnloadMIDI();
         }
+        if (key == GLFW_KEY_G)
+            EnableGlow = EnableGlow? 0 : 1;
+        if (key == GLFW_KEY_T)
+            EnableTransparency = EnableTransparency? 0 : 1;
     }
     if (key == GLFW_KEY_RIGHT)
         clock_skip(tickscale, 0);
@@ -226,6 +230,26 @@ void drop_callback(GLFWwindow* w, int count, const char** paths)
             heap_playlistptr->filedirs[i] = strdup(paths[i]); 
         spawn_playlist_thread(heap_playlistptr);
     }
+}
+
+char filename_truncated[33];
+double lastscrollupdate = 0.0;
+int filenamepos = 0;
+const char* scrollfilenameifover32characters(const char* filename)
+{
+    if (filename_len <= 32) return filename;
+
+    double now = get_time();
+    if ((now - lastscrollupdate) < 0.1) return filename_truncated;
+    lastscrollupdate = now;
+
+    for (int i = 0; i < 32; i++) {
+        filename_truncated[i] = filename[(filenamepos + i) % filename_len];
+    }
+    filename_truncated[32] = '\0';
+    filenamepos = (filenamepos + 1) % filename_len;
+    
+    return filename_truncated;
 }
 
 int Window_Init(void)
@@ -266,7 +290,8 @@ int Window_Init(void)
 
     printf("GL_VERSION: %s\n", glGetString(GL_VERSION));
     printf("GL_RENDERER: %s\n", glGetString(GL_RENDERER));
-
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     return 1;
 }
 
@@ -304,8 +329,8 @@ void Window_Run(const char* filepath)
             AddCommas(current_clock), WindowTicks, AddCommas(NotesDrawnLastFrame), bpm, AddCommas(fps));
         
         Text_Draw(fbWidth, fbHeight, 5, fbHeight - 16, 1.75f, 0.0f, 0.7f, 1.0f,
-            "%s | notes: %s / %s (%s/s)", filename, AddCommas(playednotes), AddCommas(totalnotes), AddCommas(notespersec));
-        
+            "%s | notes: %s / %s (%s/s)", scrollfilenameifover32characters(filename), AddCommas(playednotes), AddCommas(totalnotes), AddCommas(notespersec));
+
         glfwSwapBuffers(win);
         glfwPollEvents();
         limitframerateto(60);

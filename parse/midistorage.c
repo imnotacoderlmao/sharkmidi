@@ -10,4 +10,5 @@ uint32_t ppq = 0;
 uint32_t tempoCount = 0;
 uint32_t sysexCount = 0;
 int32_t maxTick = 0;
-char* filename = "to load a midi, drag and drop one to the window";
+const char* filename = "to load a midi, drag and drop one to the window";
+int filename_len = 0;

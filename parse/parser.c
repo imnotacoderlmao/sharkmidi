@@ -116,9 +116,12 @@ const char* getfilename(const char* filedir) {
     }
 
     const char* start_ptr = filedir + (i + 1);
-    int filename_len = strlen(start_ptr);
+    filename_len = strlen(start_ptr) + 1;
     char* filename = malloc((filename_len + 1) * sizeof(char));
     strcpy(filename, start_ptr);
+    if(filename_len > 32)
+        filename[filename_len-1] = ' ';
+    filename[filename_len] = '\0';
     return filename;
 }
 
@@ -611,6 +614,7 @@ void UnloadMIDI(void)
     totalnotes = 0;
     eventcount = 0;
     filename = "no midi loaded";
+    filename_len = 0;
     for (uint32_t i = 0; i < sysexCount; i++)
         free(sysexArr[i].message);
     free(sysexArr);
