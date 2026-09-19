@@ -6,7 +6,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
-int64_t playednotes = 0, playednotes2 = 0;
+int64_t playednotes = 0, playednotes2 = 0, notespersec = 0;
 int32_t current_clock = 0;
 double now = 0.0, last = 0.0, laststatsupdate = 0;
 double bpm = 120.0;
@@ -17,7 +17,6 @@ volatile int paused = 0, stopping = 1;
 int skipping = 0;
 int64_t npshistory[60];
 int npshistoryidx = 0;
-int64_t notespersec = 0;
 const double STALL_THRESH = 0.0166667;
 // oh god do i really have to abuse macros too
 #define MIN(a, b) (((a) < (b)) ? (a) : (b))
@@ -97,9 +96,9 @@ void UpdatePlaybackStats()
     playednotes2 = playednotes;
 
     if(voicefetching)
-        printf("tick: %s / %s | played notes: %s / %s (%s/s) | bpm: %.2lf | midi thread: %s | %d voices        \r", AddCommas(current_clock), AddCommas(maxTick), AddCommas(playednotes), AddCommas(totalnotes), AddCommas(notespersec), bpm, AddCommas((int64_t)midifps), GetVoiceCount());
+        printf("tick: %s / %s | played notes: %s / %s (%s/s) | bpm: %.2lf | midi thread: %s fps | %d voices        \r", AddCommas(current_clock), AddCommas(maxTick), AddCommas(playednotes), AddCommas(totalnotes), AddCommas(notespersec), bpm, AddCommas((int64_t)midifps), GetVoiceCount());
     else
-        printf("tick: %s / %s | played notes: %s / %s (%s/s) | bpm: %.2lf | midi thread: %s        \r", AddCommas(current_clock), AddCommas(maxTick), AddCommas(playednotes), AddCommas(totalnotes), AddCommas(notespersec), bpm, AddCommas((int64_t)midifps));
+        printf("tick: %s / %s | played notes: %s / %s (%s/s) | bpm: %.2lf | midi thread: %s fps        \r", AddCommas(current_clock), AddCommas(maxTick), AddCommas(playednotes), AddCommas(totalnotes), AddCommas(notespersec), bpm, AddCommas((int64_t)midifps));
     laststatsupdate = get_time();
 }
 

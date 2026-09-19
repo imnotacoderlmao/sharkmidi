@@ -1,10 +1,13 @@
 #include "windower.h"
 #include "renderer.h"
+#include "../parse/midistorage.h"
 #include "../playback/playback_thread.h"
 #include "../playback/timer.h"
 #include "../parse/parser.h"
 #include "../third_party/glad/include/glad/glad.h"
 #include "../synth/sound.h"
+#include "../third_party/conmidi_digit_formatter.h"
+#include "text_renderer.h"
 #include <GLFW/glfw3.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -20,9 +23,7 @@ typedef struct
 #if defined(_WIN32) || defined(_WIN64)
 #include <windows.h>
 
-static HANDLE playbackThread = NULL;
-static HANDLE playlistThread = NULL;
-
+static HANDLE backgroundthread = NULL;
 static DWORD WINAPI playback_thread_entry(LPVOID arg)
 {
     StartPlayback((int)(intptr_t)arg);
@@ -31,9 +32,9 @@ static DWORD WINAPI playback_thread_entry(LPVOID arg)
 
 static void spawn_playback_thread(int singlethread)
 {
-    if (playbackThread)
-        CloseHandle(playbackThread);
-    playbackThread = CreateThread(NULL, 0, playback_thread_entry, (LPVOID)(intptr_t)singlethread, 0, NULL);
+    if (backgroundthread)
+        CloseHandle(backgroundthread);
+    backgroundthread = CreateThread(NULL, 0, playback_thread_entry, (LPVOID)(intptr_t)singlethread, 0, NULL);
 }
 
 static DWORD WINAPI playlist_thread_entry(LPVOID arg)
@@ -61,26 +62,27 @@ static DWORD WINAPI playlist_thread_entry(LPVOID arg)
 
 static void spawn_playlist_thread(playlist_t* playlist)
 {
-    if (playlistThread)
-        CloseHandle(playlistThread);
-    playlistThread = CreateThread(NULL, 0, playlist_thread_entry, (LPVOID)playlist, 0, NULL);
+    if (backgroundthread)
+        CloseHandle(backgroundthread);
+    backgroundthread = CreateThread(NULL, 0, playlist_thread_entry, (LPVOID)playlist, 0, NULL);
 }
 
-static void join_playback_thread(void)
+static DWORD WINAPI loading_thread_entry(void* arg)
 {
-    if (playbackThread)
-    {
-        WaitForSingleObject(playbackThread, 1000);
-        CloseHandle(playbackThread);
-        playbackThread = NULL;
-    }
+    LoadMIDI((const char*)arg);
+    Renderer_InitForMIDI();
+    return 0;
 }
 
+static void spawn_loading_thread(const char* filepath)
+{
+    const char* filepath_local = strdup(filepath);
+    backgroundthread = CreateThread(NULL, 0, loading_thread_entry, (LPVOID)filepath_local, 0, NULL);
+}
 #else
 #include <pthread.h>
 
-static pthread_t playbackThread;
-static pthread_t playlistThread;
+static pthread_t backgroundThread;
 
 static void* playback_thread_entry(void* arg)
 {
@@ -90,7 +92,7 @@ static void* playback_thread_entry(void* arg)
 
 static void spawn_playback_thread(int singlethread)
 {
-    pthread_create(&playbackThread, NULL, playback_thread_entry, (void*)(intptr_t)singlethread);
+    pthread_create(&backgroundThread, NULL, playback_thread_entry, (void*)(intptr_t)singlethread);
 }
 
 static void* playlist_thread_entry(void* arg)
@@ -118,12 +120,20 @@ static void* playlist_thread_entry(void* arg)
 
 static void spawn_playlist_thread(playlist_t* playlist)
 {
-    pthread_create(&playlistThread, NULL, playlist_thread_entry, (void*)playlist);
+    pthread_create(&backgroundThread, NULL, playlist_thread_entry, (void*)playlist);
 }
 
-static void join_playback_thread(void)
+static void* loading_thread_entry(void* arg)
 {
-    pthread_join(playbackThread, NULL);
+    LoadMIDI((const char*)arg);
+    Renderer_InitForMIDI();
+    return NULL;
+}
+
+static void spawn_loading_thread(const char* filepath)
+{
+    const char* filepath_local = strdup(filepath);
+    pthread_create(&backgroundThread, NULL, loading_thread_entry, (void*)filepath_local);
 }
 #endif
 
@@ -135,6 +145,7 @@ static void glfw_error_callback(int code, const char* desc)
 }
 
 double delta_time = 0.0, last_time = 0.0;
+int fps = 0;
 
 static void limitframerateto(int target_fps)
 {
@@ -202,8 +213,7 @@ void drop_callback(GLFWwindow* w, int count, const char** paths)
 {
     if (count == 1)
     {
-        LoadMIDI(paths[0]);
-        Renderer_InitForMIDI();
+        spawn_loading_thread(paths[0]);
     }
     else
     {
@@ -260,10 +270,10 @@ int Window_Init(void)
     return 1;
 }
 
-void Window_Run(char* filepath)
+void Window_Run(const char* filepath)
 {
     Renderer_Init();
-    
+    Text_Init();
     if (filepath != NULL && LoadMIDI(filepath))
     {
         Renderer_InitForMIDI();
@@ -278,26 +288,34 @@ void Window_Run(char* filepath)
     {
         delta_time = get_time() - last_time;
         last_time += delta_time;
+        fps = (int)(1.0/delta_time);
         
         int fbWidth, fbHeight;
         glfwGetFramebufferSize(win, &fbWidth, &fbHeight);
+        glViewport(0, 0, fbWidth, fbHeight);
 
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
         if (midiloaded)
             Renderer_Render(fbWidth, fbHeight, current_clock, PAD);
 
+        Text_Draw(fbWidth, fbHeight, 5, 4, 1.75f, 0.0f, 1.0f, 0.0f,
+            "tick: %s | zoom: %d | QoS: %s | bpm: %.2f | fps: %s",
+            AddCommas(current_clock), WindowTicks, AddCommas(NotesDrawnLastFrame), bpm, AddCommas(fps));
+        
+        Text_Draw(fbWidth, fbHeight, 5, fbHeight - 16, 1.75f, 0.0f, 0.7f, 1.0f,
+            "%s | notes: %s / %s (%s/s)", filename, AddCommas(playednotes), AddCommas(totalnotes), AddCommas(notespersec));
+        
         glfwSwapBuffers(win);
         glfwPollEvents();
         limitframerateto(60);
     }
-
     stopping = 1;
-    join_playback_thread();
 }
 
 void Window_Shutdown(void)
 {
+    Text_Dispose();
     Renderer_Dispose();
     UnloadMIDI();
     glfwDestroyWindow(win);

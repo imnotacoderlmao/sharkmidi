@@ -33,4 +33,5 @@ extern uint32_t tempoCount;
 extern uint32_t sysexCount;
 extern uint32_t ppq;
 extern int32_t maxTick;
+extern char* filename;
 #endif

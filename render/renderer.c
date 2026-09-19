@@ -1,7 +1,6 @@
 #include "renderer.h"
 #include "../parse/midistorage.h"
 #include "../parse/parser.h"
-#include "../third_party/glad/include/glad/glad.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -68,9 +67,31 @@ static const char* LineFragSrc =
 "    fragColor = vec4(color, note_opacity);\n"
 "}\n";
 
-static GLuint lineShader;
+static const char* CursorVertSrc =
+"#version 420 core\n"
+"uniform float uCursorX;\n"
+"uniform float uHalfWidthNDC;\n"
+"uniform float uYBottom;\n"
+"uniform float uYTop;\n"
+"void main()\n"
+"{\n"
+"    bool isRight = (uint(gl_VertexID) & 1u) != 0u;\n"
+"    bool isTop = ((uint(gl_VertexID) >> 1) & 1u) != 0u;\n"
+"    float x = uCursorX + (isRight ? uHalfWidthNDC : -uHalfWidthNDC);\n"
+"    float y = isTop ? uYTop : uYBottom;\n"
+"    gl_Position = vec4(x, y, 0.0, 1.0);\n"
+"}\n";
+
+static const char* CursorFragSrc =
+"#version 420 core\n"
+"uniform vec3 uLineColor;\n"
+"out vec4 fragColor;\n"
+"void main() { fragColor = vec4(uLineColor, 1.0); }\n";
+
+static GLuint lineShader, cursorShader;
+static GLint uc_cursorX, uc_halfWidth, uc_yBottom, uc_yTop, uc_lineColor;
 static GLint u_metrics, u_viewStart, u_viewEnd, u_palette, u_glowEnabled, u_transparencyEnabled, u_currentTick;
-static GLuint vao, vboBuffer, paletteTex;
+static GLuint vao, cursorVAO, vboBuffer, paletteTex;
 
 static RenderNote* ring;
 static int ringCap = 1 << 23;
@@ -82,7 +103,7 @@ static int paletteUploadPending = 0;
 
 static KeyHeader* keyHeaders;
 
-static int lookaheadTicks = 4000;
+static int lookaheadTicks = 500;
 static float pixelsPerTick;
 static int lastWindowTicks = -1;
 static int lastSweepEnd = -1;
@@ -112,7 +133,7 @@ static GLuint compile_stage(GLenum type, const char* src)
     return shader;
 }
 
-static GLuint build_shader(const char* vert, const char* frag)
+GLuint build_shader(const char* vert, const char* frag)
 {
     GLuint v = compile_stage(GL_VERTEX_SHADER, vert);
     GLuint f = compile_stage(GL_FRAGMENT_SHADER, frag);
@@ -238,6 +259,14 @@ void Renderer_Init(void)
     u_transparencyEnabled = glGetUniformLocation(lineShader, "uTransparencyEnabled");
     u_currentTick = glGetUniformLocation(lineShader, "uCurrentTick");
 
+    cursorShader = build_shader(CursorVertSrc, CursorFragSrc);
+    uc_cursorX  = glGetUniformLocation(cursorShader, "uCursorX");
+    uc_halfWidth = glGetUniformLocation(cursorShader, "uHalfWidthNDC");
+    uc_yBottom  = glGetUniformLocation(cursorShader, "uYBottom");
+    uc_yTop     = glGetUniformLocation(cursorShader, "uYTop");
+    uc_lineColor = glGetUniformLocation(cursorShader, "uLineColor");
+    glGenVertexArrays(1, &cursorVAO); 
+
     glUseProgram(lineShader);
     glUniform1i(u_palette, 0);
     glUseProgram(0);
@@ -290,6 +319,8 @@ void Renderer_Dispose(void)
     if (paletteTex != 0) { glDeleteTextures(1, &paletteTex); paletteTex = 0; }
     if (vao != 0) { glDeleteVertexArrays(1, &vao); vao = 0; }
     if (lineShader != 0) { glDeleteProgram(lineShader); lineShader = 0; }
+    glDeleteVertexArrays(1, &cursorVAO);
+    glDeleteProgram(cursorShader);
 }
 
 
@@ -476,7 +507,7 @@ void Renderer_Render(int screenWidth, int screenHeight, int32_t tick, int pad)
     {
         pixelsPerTick = 2.0f / WindowTicks;
         lastWindowTicks = WindowTicks;
-        lookaheadTicks = WindowTicks / 2 < 2000 ? WindowTicks / 2 : 2000;
+        lookaheadTicks = WindowTicks / 2 < 250 ? WindowTicks / 2 : 250;
     }
 
     int sweepEnd = viewEnd + lookaheadTicks;
@@ -501,13 +532,12 @@ void Renderer_Render(int screenWidth, int screenHeight, int32_t tick, int pad)
     NotesDrawnLastFrame = headIdx - tailIdx;
     RingCap = ringCap;
 
+    float yBottom = -1.0f + 2.0f * pad / screenHeight;
+    float yTop = 1.0f - 2.0f * pad / screenHeight;
+    
     if (NotesDrawnLastFrame > 0)
     {
-        float yBottom = -1.0f + 2.0f * pad / screenHeight;
-        float yTop = 1.0f - 2.0f * pad / screenHeight;
         float yStep = (yTop - yBottom) / 128.0f;
-
-        glViewport(0, 0, screenWidth, screenHeight);
         glUseProgram(lineShader);
 
         glUniform3f(u_metrics, pixelsPerTick, yBottom, yStep);
@@ -540,4 +570,18 @@ void Renderer_Render(int screenWidth, int screenHeight, int32_t tick, int pad)
         glBindTexture(GL_TEXTURE_1D, 0);
         glUseProgram(0);
     }
+    float cursorX = (float)(tick - viewStart) * pixelsPerTick - 1.0f;
+    float halfWidthNDC = 1.0f / (float)screenWidth;
+
+    glUseProgram(cursorShader);
+    glUniform1f(uc_cursorX, cursorX);
+    glUniform1f(uc_halfWidth, halfWidthNDC);
+    glUniform1f(uc_yBottom, yBottom);
+    glUniform1f(uc_yTop, yTop);
+    glUniform3f(uc_lineColor, 1.0f, 0.0f, 0.0f);
+
+    glBindVertexArray(cursorVAO);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    glBindVertexArray(0);
+    glUseProgram(0);
 }

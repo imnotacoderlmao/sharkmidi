@@ -105,6 +105,23 @@ static uint16_t ReadUInt16(void)
     return __builtin_bswap16(val);
 }
 
+
+const char* getfilename(const char* filedir) {
+    int i = strlen(filedir) - 1;
+    while (i >= 0) {
+        if (filedir[i] == '/' || filedir[i] == '\\') {
+            break;
+        }
+        i--;
+    }
+
+    const char* start_ptr = filedir + (i + 1);
+    int filename_len = strlen(start_ptr);
+    char* filename = malloc((filename_len + 1) * sizeof(char));
+    strcpy(filename, start_ptr);
+    return filename;
+}
+
 static int SearchText(char* text)
 {
     for (int32_t i = 0; i < strlen(text); i++)
@@ -485,7 +502,6 @@ int64_t ParseTrackEvents(uint8_t* trackPtr, uint8_t* trackEnd, uint24_t* msgPtr,
 int LoadMIDI(const char* filepath)
 {
     UnloadMIDI();
-    midiloaded = 0;
     printf("loading %s or something\n", filepath);
     if (!InitMMF(filepath)) 
         return midiloaded;
@@ -581,6 +597,7 @@ int LoadMIDI(const char* filepath)
     munmap(filePtr, filestat.st_size);
     filePtr = NULL;
     midiloaded = 1;
+    filename = getfilename(filepath);
     return midiloaded;
 }
 
@@ -593,6 +610,7 @@ void UnloadMIDI(void)
     ppq = 0;
     totalnotes = 0;
     eventcount = 0;
+    filename = "no midi loaded";
     for (uint32_t i = 0; i < sysexCount; i++)
         free(sysexArr[i].message);
     free(sysexArr);
