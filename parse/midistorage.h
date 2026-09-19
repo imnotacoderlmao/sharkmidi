@@ -32,7 +32,7 @@ extern uint64_t totalnotes;
 extern uint32_t tempoCount;
 extern uint32_t sysexCount;
 extern uint32_t ppq;
-extern int32_t maxTick;
+extern int32_t maxTick, activetickcount;
 extern const char* filename;
 extern int filename_len;
 #endif

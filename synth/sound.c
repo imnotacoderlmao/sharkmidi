@@ -20,13 +20,12 @@ int32_t voicefetching = 0;
 int issynthinitiated = 0;
 volatile uint32_t writeptr = 0;
 volatile uint32_t readptr = 0;
-const uint32_t RINGBUFFER_SIZE = 8388608;
+const uint32_t RINGBUFFER_SIZE = 2097152;
 const uint32_t RINGBUFFER_MASK = RINGBUFFER_SIZE - 1;
 pthread_t audio_thread;
 
 void* audiothread(void* args)
 {
-    ringbuffer = (uint24_t*)calloc(RINGBUFFER_SIZE, sizeof(uint24_t));
     readptr = 0;
     puts("audio thread intialized");
     while(!stopping)
@@ -61,6 +60,8 @@ int32_t Sound_Init(int32_t singlethread)
         UnprepareLongData = KDMAPI_UnprepareLongData;
     #endif
     printf("singlethread is %s.\n", singlethread? "TRUE" : "FALSE");
+    if (!singlethread) 
+        ringbuffer = (uint24_t*)calloc(RINGBUFFER_SIZE, sizeof(uint24_t));
     if(hasvoice)
         voicefetching = 1;
     issynthinitiated = 1;

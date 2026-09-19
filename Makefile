@@ -1,5 +1,5 @@
 CC ?= gcc
-CFLAGS = -O3 -fstrict-overflow -fno-math-errno -pthread -flto
+CFLAGS = -O3 -fstrict-overflow -fno-math-errno -fno-stack-protector
 LDFLAGS = -pthread -flto
 
 # for cross compilation purposes

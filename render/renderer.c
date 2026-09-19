@@ -1,6 +1,7 @@
 #include "renderer.h"
 #include "../parse/midistorage.h"
 #include "../parse/parser.h"
+#include "../playback/playback_thread.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -414,24 +415,43 @@ static int64_t process_tick_events(uint8_t* messages, uint8_t* tracks, KeyHeader
     return currentOffset;
 }
 
+static int32_t find_active_tick_idx(int32_t targetTick)
+{
+    int32_t low = 0;
+    int32_t high = (int32_t)activetickcount - 1;
+    int32_t ans = activetickcount;
+
+    while (low <= high)
+    {
+        int32_t mid = low + (high - low) / 2;
+        if (timingArr[mid].tick >= targetTick)
+        {
+            ans = mid;
+            high = mid - 1;
+        }
+        else
+            low = mid + 1;
+    }
+    return ans;
+}
+
 static void sweep_range(int fromTick, int toTick)
 {
-    TickGroup* group = timingArr;
+    if (activetickcount == 0 || timingArr == NULL) return;
+
     uint8_t* messages = (uint8_t*)eventArr;
-    //uint8_t* tracks = trackArr; // NULL for now
     uint8_t* tracks = trackArr;
 
-    int from = fromTick < maxTick ? fromTick : maxTick;
     int limit = toTick < maxTick ? toTick : maxTick;
     int headLocal = headIdx;
 
-    int64_t currentOffset = group[from].event_offset;
-    for (int tick = from; tick <= limit; tick++)
+    int32_t idx = find_active_tick_idx(fromTick);
+    while (idx < activetickcount && timingArr[idx].tick <= limit)
     {
-        if (group[tick].tick == INT32_MAX)
-            break;
+        int32_t tick = timingArr[idx].tick;
+        int64_t currentOffset = timingArr[idx].event_offset;
+        int64_t nextOffset = timingArr[idx + 1].event_offset;
 
-        int64_t nextOffset = group[tick + 1].event_offset;
         while (headLocal - tailIdx + (nextOffset - currentOffset) >= mask + 1)
         {
             headIdx = headLocal;
@@ -439,10 +459,10 @@ static void sweep_range(int fromTick, int toTick)
         }
         currentOffset = process_tick_events(messages, tracks, keyHeaders, ring, mask,
             currentOffset, nextOffset, tick, &headLocal);
+        idx++;
     }
     headIdx = headLocal;
 }
-
 static void advance_tail(int viewStart)
 {
     int safeTail = headIdx - ringCap;
@@ -500,8 +520,17 @@ void Renderer_Render(int screenWidth, int screenHeight, int32_t tick, int pad)
     }
 
     int half = WindowTicks >> 1;
-    int viewStart = tick - half; if (viewStart < 0) viewStart = 0; if (viewStart > maxTick) viewStart = maxTick;
-    int viewEnd = tick + half; if (viewEnd < 0) viewEnd = 0; if (viewEnd > maxTick) viewEnd = maxTick;
+    int viewStart = tick - half; 
+    if (viewStart < 0) 
+        viewStart = 0; 
+    if (viewStart > maxTick) 
+        viewStart = maxTick;
+    
+    int viewEnd = tick + half; 
+    if (viewEnd < 0) 
+        viewEnd = 0; 
+    if (viewEnd > maxTick) 
+        viewEnd = maxTick;
 
     if (WindowTicks != lastWindowTicks)
     {

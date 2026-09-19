@@ -7,12 +7,8 @@
 #include <stdint.h>
 #include <string.h>
 int64_t playednotes = 0, playednotes2 = 0, notespersec = 0;
-int32_t current_clock = 0;
-double now = 0.0, last = 0.0, laststatsupdate = 0;
-double bpm = 120.0;
-volatile double delta = 0.0;
-double tickscale = 0.0;
-volatile double tick = 0.0;
+double now = 0.0, last = 0.0, delta = 0.0, tick = 0.0;
+double laststatsupdate = 0.0, bpm = 120.0, tickscale = 0.0;
 volatile int paused = 0, stopping = 1;
 int skipping = 0;
 int64_t npshistory[60];
@@ -78,16 +74,15 @@ void SetBPM(uint24_t microsec)
     tickscale = (bpm * ppq) / 60.0;
 }
 
-
+double midifps = 0;
 void UpdatePlaybackStats()
-{
-    if (current_clock >= maxTick) 
+{   
+    if ((now - laststatsupdate) < 0.01666666)
+        return;
+    if (tick >= maxTick) 
         stopping = 1;
     
-    if ((get_time() - laststatsupdate) < 0.01666666)
-        return;
-
-    double midifps = 1 / delta;
+    midifps = 1 / delta;
 
     npshistoryidx = (npshistoryidx + 1) % 60;
     notespersec -= npshistory[npshistoryidx];
@@ -95,11 +90,15 @@ void UpdatePlaybackStats()
     notespersec += npshistory[npshistoryidx];
     playednotes2 = playednotes;
 
+    AddCommas(tick, curr_tick_str);
+    AddCommas(playednotes, playednotes_str);
+    AddCommas(notespersec, play_nps_str);
+    AddCommas(midifps, midifps_str);
     if(voicefetching)
-        printf("tick: %s / %s | played notes: %s / %s (%s/s) | bpm: %.2lf | midi thread: %s fps | %d voices        \r", AddCommas(current_clock), AddCommas(maxTick), AddCommas(playednotes), AddCommas(totalnotes), AddCommas(notespersec), bpm, AddCommas((int64_t)midifps), GetVoiceCount());
+        printf("tick: %s / %s | played notes: %s / %s (%s/s) | bpm: %.2lf | midi thread: %s fps | %d voices        \r", curr_tick_str, maxtick_str, playednotes_str, totalnotes_str, play_nps_str, bpm, midifps_str, GetVoiceCount());
     else
-        printf("tick: %s / %s | played notes: %s / %s (%s/s) | bpm: %.2lf | midi thread: %s fps        \r", AddCommas(current_clock), AddCommas(maxTick), AddCommas(playednotes), AddCommas(totalnotes), AddCommas(notespersec), bpm, AddCommas((int64_t)midifps));
-    laststatsupdate = get_time();
+        printf("tick: %s / %s | played notes: %s / %s (%s/s) | bpm: %.2lf | midi thread: %s fps        \r", curr_tick_str, maxtick_str, playednotes_str, totalnotes_str, play_nps_str, bpm, midifps_str);
+    laststatsupdate = now;
 }
 
 void SubmitSysEx(SysExEvent sysex)
@@ -140,12 +139,6 @@ void SubmitSysEx(SysExEvent sysex)
     #endif
 }
 
-enum playbackargs
-{
-    SINGLE_THREADED,
-    IS_PLAYLIST
-};
-
 void StartPlayback(int singlethread)
 {
     if (!midiloaded)
@@ -155,38 +148,35 @@ void StartPlayback(int singlethread)
     }
     stopping = 0;
     if (!singlethread)
-    {
         audiothread_entry();
-    }
     uint24_t* eventptr = eventArr;
     TickGroup* timing = timingArr;
     TempoEvent* tempo = tempoArr;
     SysExEvent* sysex = sysexArr;
-    current_clock = 0;
+    int32_t last_clock = 0;
     size_t played = 0;
     clock_start();
     while(!stopping)
     {
         int32_t clock = (int32_t)clock_getTick();
-        if (current_clock > clock)
+        if (clock < last_clock)
         {
-            while (timing->tick > clock && clock > 0)
+            while (timing > timingArr && timing->tick > clock)
             {
                 timing--;
                 played = timing->event_offset;
                 playednotes -= timing->notecount;
             }
-            while (tempo->tick > clock && tempo > tempoArr) 
+            while (tempo > tempoArr && tempo->tick > clock) 
                 tempo--;
-            while (sysex->tick > clock && sysex > sysexArr)
+            while (sysex > sysexArr && sysex->tick > clock)
                 sysex--;
         }
         while (timing->tick <= clock)
         {
-            current_clock = timing->tick;
             if (!skipping)
             {
-                size_t count =  timing->event_offset;
+                size_t count = (timing + 1)->event_offset;
                 if (!singlethread)
                 {
                     while (played < count)
@@ -202,12 +192,12 @@ void StartPlayback(int singlethread)
                 { 
                     while (played < count)
                         SendDirectData((uint32_t)uint24_get(eventptr + played++));
-                }
+                }        
             }
             else
-                played = timing->event_offset;
+                played = (timing + 1)->event_offset;
             playednotes += timing->notecount;
-            UpdatePlaybackStats();
+            last_clock = clock;
             timing++;
         }
         while (tempo->tick <= clock)
@@ -220,12 +210,12 @@ void StartPlayback(int singlethread)
             SubmitSysEx(*sysex);
             sysex++;
         }
+        UpdatePlaybackStats();
     }
     clock_start();
     AllNotesOFF();
     uint8_t rolandreset[] = {0xF0, 0x41, 0x10, 0x42, 0x12, 0x40, 0x00, 0x7F, 0x00, 0x41, 0xF7};
     SubmitSysEx((SysExEvent){0, 11, rolandreset});
-    current_clock = 0;
     playednotes = 0, playednotes2 = 0;
     puts("\nPlayback finished...");
 }

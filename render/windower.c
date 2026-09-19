@@ -14,6 +14,8 @@
 #include <string.h>
 
 int singlethread = 1;
+int dynascroll = 0;
+double scrollfactor = 1.0;
 typedef struct
 {
     int count;
@@ -196,6 +198,8 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
             EnableGlow = EnableGlow? 0 : 1;
         if (key == GLFW_KEY_T)
             EnableTransparency = EnableTransparency? 0 : 1;
+        if (key == GLFW_KEY_S)
+            dynascroll = dynascroll? 0 : 1;
     }
     if (key == GLFW_KEY_RIGHT)
         clock_skip(tickscale, 0);
@@ -204,11 +208,30 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
         clock_skip(tickscale * -1, 0);
 
     if (key == GLFW_KEY_UP)
-        WindowTicks /= 1.1;
-
-    if (key == GLFW_KEY_DOWN)
-        WindowTicks = (WindowTicks * 1.1) + 1;   
+    {
+        if (dynascroll)
+        {
+            if (scrollfactor <= 0.5)
+                scrollfactor /= 2;
+            else
+                scrollfactor -= 0.1; 
+        }
+        else
+            WindowTicks /= 1.1;
+    }
     
+    if (key == GLFW_KEY_DOWN)
+    {
+        if (dynascroll)
+        {
+            if (scrollfactor <= 0.5)
+                scrollfactor *= 2;
+            else
+                scrollfactor += 0.1; 
+        }
+        else
+            WindowTicks = (WindowTicks * 1.1) + 1;   
+    }
     if (key == GLFW_KEY_R)
         stopping = 1;
 }
@@ -295,6 +318,13 @@ int Window_Init(void)
     return 1;
 }
 
+int32_t getvisualtick()
+{
+    if (paused || stopping) return tick;
+    double now = get_time();
+    return (int32_t)(tick + (now - last) * tickscale); // playback thread's "last"
+}
+
 void Window_Run(const char* filepath)
 {
     Renderer_Init();
@@ -322,14 +352,19 @@ void Window_Run(const char* filepath)
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
         if (midiloaded)
-            Renderer_Render(fbWidth, fbHeight, current_clock, PAD);
+            Renderer_Render(fbWidth, fbHeight, getvisualtick(), PAD);
 
+        if (dynascroll)
+            WindowTicks = (int)(tickscale * scrollfactor);
+
+        AddCommas(fps, rendererfps_str);
+        AddCommas(NotesDrawnLastFrame, quad_on_screen_str);            
         Text_Draw(fbWidth, fbHeight, 5, 4, 1.75f, 0.0f, 1.0f, 0.0f,
             "tick: %s | zoom: %d | QoS: %s | bpm: %.2f | fps: %s",
-            AddCommas(current_clock), WindowTicks, AddCommas(NotesDrawnLastFrame), bpm, AddCommas(fps));
+            curr_tick_str, WindowTicks, quad_on_screen_str, bpm, rendererfps_str);
         
         Text_Draw(fbWidth, fbHeight, 5, fbHeight - 16, 1.75f, 0.0f, 0.7f, 1.0f,
-            "%s | notes: %s / %s (%s/s)", scrollfilenameifover32characters(filename), AddCommas(playednotes), AddCommas(totalnotes), AddCommas(notespersec));
+            "%s | notes: %s / %s (%s/s)", scrollfilenameifover32characters(filename), playednotes_str, totalnotes_str, play_nps_str);
 
         glfwSwapBuffers(win);
         glfwPollEvents();
