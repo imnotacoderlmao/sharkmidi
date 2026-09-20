@@ -18,6 +18,7 @@ const double STALL_THRESH = 0.0166667;
 // oh god do i really have to abuse macros too
 #define MIN(a, b) (((a) < (b)) ? (a) : (b))
 #define MAX(a, b) (((a) > (b)) ? (a) : (b))
+#define INFINITY 1.7976931348623157e+308
 
 void clock_start(void)
 {
@@ -30,18 +31,52 @@ void clock_start(void)
     paused = 0;
 }
 
+static TempoEvent* g_tempo_cursor = NULL; 
+void SetBPM(uint24_t microsec)
+{
+    bpm = 60000000.0 / uint24_get(&microsec);
+    tickscale = (bpm * ppq) / 60.0;
+}
+
 double clock_getTick(void)
 {
-    if (paused)
-    {
-        os_sleep_ms(1);
-        return tick;
-    }
+    if (paused) { os_sleep_ms(1); return tick; }
     now = get_time();
+    double remaining = MIN(now - last, STALL_THRESH);
     delta = now - last;
     last = now;
-    tick += MIN(delta, STALL_THRESH) * tickscale;
+    // for tick to not jump too much when you have microsecond tempo changes or something
+    while (remaining > 0.0)
+    {
+        double ticks_to_next_tempo = g_tempo_cursor->tick - tick;
+        double time_to_next_tempo = ticks_to_next_tempo / tickscale;
+        double step_time = MIN(remaining, time_to_next_tempo);
+        tick += step_time * tickscale;
+        remaining -= step_time;
+
+        if (step_time == time_to_next_tempo)
+        {
+            SetBPM(g_tempo_cursor->microsec);
+            g_tempo_cursor++;
+        }
+        else 
+            break;
+    }
     return tick;
+}
+
+void clock_skip(double skiptick, int skipto)
+{
+    double tickafterskip = MAX(0, tick + skiptick);
+    tick = skipto ? skiptick : tickafterskip;
+    // resync tempo cursor, this will be done both ways
+    while (g_tempo_cursor > tempoArr && g_tempo_cursor->tick > tick)
+        g_tempo_cursor--;
+    while (g_tempo_cursor->tick <= tick && g_tempo_cursor->tick != INT32_MAX)
+    {
+        SetBPM(g_tempo_cursor->microsec);
+        g_tempo_cursor++;
+    }
 }
 
 void clock_pause(void)
@@ -57,23 +92,6 @@ void clock_pause(void)
         last = get_time();
         paused = 0;
     }
-}
-
-void clock_skip(double skiptick, int skipto)
-{
-    double tickafterskip = MAX(0, tick + skiptick);
-    if (skipto)
-    {
-        tick = skiptick;
-        return;
-    }
-    tick = tickafterskip;
-}
-
-void SetBPM(uint24_t microsec)
-{
-    bpm = 60000000.0 / uint24_get(&microsec);
-    tickscale = (bpm * ppq) / 60.0;
 }
 
 double midifps = 0;
@@ -153,7 +171,7 @@ void StartPlayback(int singlethread)
         audiothread_entry();
     uint24_t* eventptr = eventArr;
     TickGroup* timing = timingArr;
-    TempoEvent* tempo = tempoArr;
+    g_tempo_cursor = tempoArr;
     SysExEvent* sysex = sysexArr;
     size_t played = 0;
     clock_start();
@@ -168,8 +186,6 @@ void StartPlayback(int singlethread)
                 played = timing->event_offset;
                 playednotes -= timing->notecount;
             }
-            while (tempo > tempoArr && tempo->tick > clock) 
-                tempo--;
             while (sysex > sysexArr && sysex->tick > clock)
                 sysex--;
         }
@@ -202,11 +218,6 @@ void StartPlayback(int singlethread)
             current_clock = timing->tick;
             UpdatePlaybackStats();
             timing++;
-        }
-        while (tempo->tick <= clock)
-        {
-            SetBPM(tempo->microsec);
-            tempo++;
         }
         while (sysex->tick <= clock)
         {
