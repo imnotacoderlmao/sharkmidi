@@ -16,5 +16,6 @@ extern int RingCap;
 extern int EnableGlow;
 extern int EnableTransparency;
 extern int UseForceCull;
+extern int stationarynotes;
 
 #endif

@@ -116,6 +116,7 @@ int NotesDrawnLastFrame = 0;
 int UseForceCull = 1;
 int EnableGlow = 1;
 int EnableTransparency = 0;
+int stationarynotes = 0;
 
 static GLuint compile_stage(GLenum type, const char* src)
 {
@@ -519,14 +520,14 @@ void Renderer_Render(int screenWidth, int screenHeight, int32_t tick, int pad)
         deferredRingCap = -1;
     }
 
-    int half = WindowTicks >> 1;
-    int viewStart = tick - half; 
+    int tickstationary = (int)(tick / WindowTicks) * WindowTicks;
+    int viewStart = stationarynotes? tickstationary : (tick - (WindowTicks >> 1)); 
     if (viewStart < 0) 
         viewStart = 0; 
     if (viewStart > maxTick) 
         viewStart = maxTick;
     
-    int viewEnd = tick + half; 
+    int viewEnd = viewStart + WindowTicks; 
     if (viewEnd < 0) 
         viewEnd = 0; 
     if (viewEnd > maxTick) 

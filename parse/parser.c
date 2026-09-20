@@ -206,6 +206,19 @@ static int cmp_sysex(const void* a, const void* b)
     return (posa > posb) - (posa < posb);
 }
 
+int32_t __attribute__((noinline)) varlen_decode_slow(int32_t* len, uint8_t** trackPtr)
+{
+    *len &= 0x7F;
+    uint8_t b = 0;
+    do 
+    { 
+        b = *((*trackPtr)++);
+        *len = (*len << 7) | (b & 0x7F); 
+    } 
+    while (b >= 0x80);
+    return *len;
+}
+
 int64_t CountTrackEvents(uint8_t* trackPtr, uint8_t* trackEnd, TickGroup_arr* tickgroup)
 {
     int64_t totalnotes_local = 0;
@@ -220,17 +233,7 @@ int64_t CountTrackEvents(uint8_t* trackPtr, uint8_t* trackEnd, TickGroup_arr* ti
     {
         int32_t delta = *trackPtr++;
         if (delta >= 0x80)
-        {
-            delta &= 0x7F;
-            uint8_t b = 0;
-            do 
-            { 
-                b = *trackPtr++;
-                delta = (delta << 7) | (b & 0x7F); 
-            } 
-            while (b >= 0x80);
-        }
-
+            delta = varlen_decode_slow(&delta, &trackPtr);
         if(delta > 0)
         {
             if (count > 0)
@@ -262,14 +265,9 @@ int64_t CountTrackEvents(uint8_t* trackPtr, uint8_t* trackEnd, TickGroup_arr* ti
                 {
                     case 0xF0:
                         {
-                            int32_t len = 0;
-                            while (true)
-                            {
-                                uint8_t curByte = *trackPtr++;
-                                len = (len << 7) | (curByte & 0x7F);
-                                if ((curByte & 0x80) == 0) 
-                                    break;
-                            }
+                            int32_t len = *trackPtr++;
+                            if (len >= 0x80)
+                                varlen_decode_slow(&len, &trackPtr);
                             trackPtr += len;
                         }
                         continue;
@@ -286,14 +284,9 @@ int64_t CountTrackEvents(uint8_t* trackPtr, uint8_t* trackEnd, TickGroup_arr* ti
                         readEvent = *trackPtr++;
                         if (readEvent != 0x2F)
                         {
-                            int32_t len2 = 0;
-                            while (true)
-                            {
-                                uint8_t curByte = *trackPtr++;
-                                len2 = (len2 << 7) | (curByte & 0x7F);
-                                if ((curByte & 0x80) == 0) 
-                                    break;
-                            }
+                            int32_t len2 = *trackPtr++;
+                            if (len2 >= 0x80)
+                                varlen_decode_slow(&len2, &trackPtr);
                             trackPtr += len2;
                         }
                         else
@@ -344,16 +337,8 @@ int64_t ParseTrackEvents(uint8_t* trackPtr, uint8_t* trackEnd, uint24_t* msgPtr,
     {
         int32_t delta = *trackPtr++;
         if (delta >= 0x80)
-        {
-            delta &= 0x7F;
-            uint8_t b = 0;
-            do 
-            { 
-                b = *trackPtr++;
-                delta = (delta << 7) | (b & 0x7F); 
-            } 
-            while (b >= 0x80);
-        }
+            delta = varlen_decode_slow(&delta, &trackPtr);
+
         absolutetime += delta;
         uint8_t readEvent = *trackPtr++;
         if (readEvent >= 0x80)
@@ -392,14 +377,10 @@ int64_t ParseTrackEvents(uint8_t* trackPtr, uint8_t* trackEnd, uint24_t* msgPtr,
                 {
                     case 0xF0:
                     {
-                        int size = 0;
-                        while (true)
-                        {
-                            uint8_t curByte = *trackPtr++;
-                            size = (size << 7) | (curByte & 0x7F);
-                            if ((curByte & 0x80) == 0) 
-                                break;
-                        }
+                        int32_t size = *trackPtr++;
+                        if(size >= 0x80)
+                            size = varlen_decode_slow(&size, &trackPtr);
+                        
                         uint8_t* data = malloc(size + 1);
                         data[0] = readEvent;
                         for (uint32_t i = 1; i < (uint32_t)(size + 1); i++)
@@ -431,14 +412,10 @@ int64_t ParseTrackEvents(uint8_t* trackPtr, uint8_t* trackEnd, uint24_t* msgPtr,
                         readEvent = *trackPtr++;
                         if (readEvent == 0x51)
                         {
-                            int len = 0;
-                            while (true)
-                            {
-                                uint8_t curByte = *trackPtr++;
-                                len = (len << 7) | (curByte & 0x7F);
-                                if ((curByte & 0x80) == 0) 
-                                    break;
-                            }
+                            int32_t len = *trackPtr++;
+                            if(len >= 0x80)
+                                len = varlen_decode_slow(&len, &trackPtr);
+                            
                             int32_t tempoVal = 0;
                             for (int i = 0; i < len; i++) 
                                 tempoVal = (tempoVal << 8) | *trackPtr++;
@@ -454,14 +431,9 @@ int64_t ParseTrackEvents(uint8_t* trackPtr, uint8_t* trackEnd, uint24_t* msgPtr,
                         }
                         else 
                         {
-                            int len = 0;
-                            while (true)
-                            {
-                                uint8_t curByte = *trackPtr++;
-                                len = (len << 7) | (curByte & 0x7F);
-                                if ((curByte & 0x80) == 0) 
-                                    break;
-                            }
+                            int len = *trackPtr++;
+                            if (len >= 0x80)
+                                len = varlen_decode_slow(&len, &trackPtr);
                             trackPtr += len;
                         }
                         continue;
@@ -503,7 +475,6 @@ void printparsestatistics(void)
     "=============== PARSE STATICTICS ===============\n"
     "   MIDI Name: %s\n"
     "   Filesize:  %s Bytes\n"
-    "\n"
     "   Took:\n"
     "       Count: %lfs (%s notes/s)\n"
     "       Parse: %lfs (%s notes/s)\n"

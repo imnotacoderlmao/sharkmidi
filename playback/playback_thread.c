@@ -13,6 +13,7 @@ volatile int paused = 0, stopping = 1;
 int skipping = 0;
 int64_t npshistory[60];
 int npshistoryidx = 0;
+int32_t current_clock = 0;
 const double STALL_THRESH = 0.0166667;
 // oh god do i really have to abuse macros too
 #define MIN(a, b) (((a) < (b)) ? (a) : (b))
@@ -24,6 +25,7 @@ void clock_start(void)
     last = now;
     bpm = 120.0;
     tick = 0.0;
+    current_clock = 0;
     tickscale = (bpm * ppq) / 60.0;
     paused = 0;
 }
@@ -153,13 +155,12 @@ void StartPlayback(int singlethread)
     TickGroup* timing = timingArr;
     TempoEvent* tempo = tempoArr;
     SysExEvent* sysex = sysexArr;
-    int32_t last_clock = 0;
     size_t played = 0;
     clock_start();
     while(!stopping)
     {
         int32_t clock = (int32_t)clock_getTick();
-        if (clock < last_clock)
+        if (clock < current_clock)
         {
             while (timing > timingArr && timing->tick > clock)
             {
@@ -197,7 +198,9 @@ void StartPlayback(int singlethread)
             else
                 played = (timing + 1)->event_offset;
             playednotes += timing->notecount;
-            last_clock = clock;
+            // this feels frankenstein, but its a way for smooth scrolling under throttle
+            current_clock = timing->tick;
+            UpdatePlaybackStats();
             timing++;
         }
         while (tempo->tick <= clock)
@@ -210,6 +213,7 @@ void StartPlayback(int singlethread)
             SubmitSysEx(*sysex);
             sysex++;
         }
+        current_clock = clock;
         UpdatePlaybackStats();
     }
     clock_start();

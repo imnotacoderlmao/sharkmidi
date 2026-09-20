@@ -13,11 +13,6 @@ void __attribute__((noinline)) AddCommas(int64_t n, char output[24])
 {
     char temp[24];
     sprintf(temp, "%ld", n);
-    if (n < 1000)
-    {
-        strcpy(output, temp);
-        return;
-    }
     
     int len = strlen(temp);
     int commas = (len - 1) / 3;
@@ -30,7 +25,7 @@ void __attribute__((noinline)) AddCommas(int64_t n, char output[24])
 
     while (i >= 0) 
     {
-        if (count == 3 && temp[i] != '-') 
+        if (count == 3 && (temp[i] >= 0x30 && temp[i] < 0x40)) 
         {
             output[j--] = ',';
             count = 0;

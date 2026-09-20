@@ -198,8 +198,10 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
             EnableGlow = EnableGlow? 0 : 1;
         if (key == GLFW_KEY_T)
             EnableTransparency = EnableTransparency? 0 : 1;
-        if (key == GLFW_KEY_S)
+        if (key == GLFW_KEY_D)
             dynascroll = dynascroll? 0 : 1;
+        if (key == GLFW_KEY_S)
+            stationarynotes = stationarynotes? 0 : 1;
     }
     if (key == GLFW_KEY_RIGHT)
         clock_skip(tickscale, 0);
@@ -318,13 +320,6 @@ int Window_Init(void)
     return 1;
 }
 
-int32_t getvisualtick()
-{
-    if (paused || stopping) return tick;
-    double now = get_time();
-    return (int32_t)(tick + (now - last) * tickscale); // playback thread's "last"
-}
-
 void Window_Run(const char* filepath)
 {
     Renderer_Init();
@@ -352,7 +347,7 @@ void Window_Run(const char* filepath)
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
         if (midiloaded)
-            Renderer_Render(fbWidth, fbHeight, getvisualtick(), PAD);
+            Renderer_Render(fbWidth, fbHeight, current_clock, PAD);
 
         if (dynascroll)
             WindowTicks = (int)(tickscale * scrollfactor);
