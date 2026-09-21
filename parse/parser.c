@@ -102,6 +102,19 @@ int InitMMF(const char* filepath)
 }
 #endif
 
+int32_t __attribute__((noinline)) varlen_decode_slow(int32_t* len, uint8_t** trackPtr)
+{
+    *len &= 0x7F;
+    uint8_t b = 0;
+    do 
+    { 
+        b = *((*trackPtr)++);
+        *len = (*len << 7) | (b & 0x7F); 
+    } 
+    while (b >= 0x80);
+    return *len;
+}
+
 static uint32_t ReadUInt32(void)
 {
     uint32_t val;
@@ -206,19 +219,6 @@ static int cmp_sysex(const void* a, const void* b)
     return (posa > posb) - (posa < posb);
 }
 
-int32_t __attribute__((noinline)) varlen_decode_slow(int32_t* len, uint8_t** trackPtr)
-{
-    *len &= 0x7F;
-    uint8_t b = 0;
-    do 
-    { 
-        b = *((*trackPtr)++);
-        *len = (*len << 7) | (b & 0x7F); 
-    } 
-    while (b >= 0x80);
-    return *len;
-}
-
 int64_t CountTrackEvents(uint8_t* trackPtr, uint8_t* trackEnd, TickGroup_arr* tickgroup)
 {
     int64_t totalnotes_local = 0;
@@ -309,7 +309,7 @@ int64_t CountTrackEvents(uint8_t* trackPtr, uint8_t* trackEnd, TickGroup_arr* ti
     puts("does this midi not have an end of track? this message isnt supposed to appear otherwise");
     finalize:
         if (absolutetime > 1 << 28)
-            printf("\ndear lord what is wrong with your midi file's varlen. current tick = %d", absolutetime);
+            printf("\ndear lord what is with your midi file's length. current tick = %d\n", absolutetime);
         #ifdef _OPENMP
             #pragma omp critical
         #endif
@@ -670,7 +670,6 @@ void UnloadMIDI(void)
     stopping = 1;
     midiloaded = 0;
     trackAmount = 0;
-    ppq = 0;
     totalnotes = 0;
     eventcount = 0;
     activetickcount = 0;

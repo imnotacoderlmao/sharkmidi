@@ -199,9 +199,15 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
         if (key == GLFW_KEY_T)
             EnableTransparency = EnableTransparency? 0 : 1;
         if (key == GLFW_KEY_D)
+        {
             dynascroll = dynascroll? 0 : 1;
+            if (dynascroll) scrollfactor = (int)(WindowTicks / tickscale);
+        }
         if (key == GLFW_KEY_S)
+        {
             stationarynotes = stationarynotes? 0 : 1;
+            if (stationarynotes) scrollfactor = (int)(WindowTicks / ppq);
+        }
     }
     if (key == GLFW_KEY_RIGHT)
         clock_skip(tickscale, 0);
@@ -218,6 +224,8 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
             else
                 scrollfactor -= 0.1; 
         }
+        else if (stationarynotes)
+            scrollfactor -= 1;
         else
             WindowTicks /= 1.1;
     }
@@ -231,6 +239,8 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
             else
                 scrollfactor += 0.1; 
         }
+        else if (stationarynotes)
+            scrollfactor += 1;
         else
             WindowTicks = (WindowTicks * 1.1) + 1;   
     }
@@ -268,9 +278,9 @@ const char* scrollfilenameifover32characters(const char* filename)
     if ((now - lastscrollupdate) < 0.1) return filename_truncated;
     lastscrollupdate = now;
 
-    for (int i = 0; i < 32; i++) {
+    for (int i = 0; i < 32; i++)
         filename_truncated[i] = filename[(filenamepos + i) % filename_len];
-    }
+
     filename_truncated[32] = '\0';
     filenamepos = (filenamepos + 1) % filename_len;
     
@@ -331,7 +341,7 @@ void Window_Run(const char* filepath)
         spawn_playback_thread(singlethread);
     }
 
-    const int PAD = 20; // placeholder until an actual gui exists
+    const int PAD = 20;
     glfwSetDropCallback(win, drop_callback);
     last_time = get_time();
     while (!glfwWindowShouldClose(win))
@@ -351,12 +361,17 @@ void Window_Run(const char* filepath)
 
         if (dynascroll)
             WindowTicks = (int)(tickscale * scrollfactor);
+        else if (stationarynotes)
+            WindowTicks = (int)(ppq * scrollfactor);
+
+        if (!stopping)
+            UpdatePlaybackStats();
 
         AddCommas(fps, rendererfps_str);
         AddCommas(NotesDrawnLastFrame, quad_on_screen_str);            
         Text_Draw(fbWidth, fbHeight, 5, 4, 1.75f, 0.0f, 1.0f, 0.0f,
-            "tick: %s | zoom: %d | QoS: %s | bpm: %.2f | fps: %s",
-            curr_tick_str, WindowTicks, quad_on_screen_str, bpm, rendererfps_str);
+            "tick: %s | zoom: %d %s | QoS: %s | bpm: %.2f | fps: %s",
+            curr_tick_str, stationarynotes? (int)scrollfactor : WindowTicks, stationarynotes? "bars" : "ticks", quad_on_screen_str, bpm, rendererfps_str);
         
         Text_Draw(fbWidth, fbHeight, 5, fbHeight - 16, 1.75f, 0.0f, 0.7f, 1.0f,
             "%s | notes: %s / %s (%s/s)", scrollfilenameifover32characters(filename), playednotes_str, totalnotes_str, play_nps_str);

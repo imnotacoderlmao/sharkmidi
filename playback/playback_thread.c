@@ -14,16 +14,14 @@ int skipping = 0;
 int64_t npshistory[60];
 int npshistoryidx = 0;
 int32_t current_clock = 0;
-const double STALL_THRESH = 0.0166667;
+const double onesixtyh = 0.016666666;
 // oh god do i really have to abuse macros too
 #define MIN(a, b) (((a) < (b)) ? (a) : (b))
 #define MAX(a, b) (((a) > (b)) ? (a) : (b))
-#define INFINITY 1.7976931348623157e+308
 
 void clock_start(void)
 {
-    now = get_time();
-    last = now;
+    last = get_time();
     bpm = 120.0;
     tick = 0.0;
     current_clock = 0;
@@ -42,7 +40,7 @@ double clock_getTick(void)
 {
     if (paused) { os_sleep_ms(1); return tick; }
     now = get_time();
-    double remaining = MIN(now - last, STALL_THRESH);
+    double remaining = MIN(now - last, onesixtyh);
     delta = now - last;
     last = now;
     // for tick to not jump too much when you have microsecond tempo changes or something
@@ -97,7 +95,8 @@ void clock_pause(void)
 double midifps = 0;
 void UpdatePlaybackStats()
 {   
-    if ((now - laststatsupdate) < 0.01666666)
+    double noww = get_time();
+    if ((noww - laststatsupdate) < onesixtyh)
         return;
     if (tick >= maxTick) 
         stopping = 1;
@@ -110,15 +109,15 @@ void UpdatePlaybackStats()
     notespersec += npshistory[npshistoryidx];
     playednotes2 = playednotes;
 
-    AddCommas(tick, curr_tick_str);
+    AddCommas(current_clock, curr_tick_str);
     AddCommas(playednotes, playednotes_str);
     AddCommas(notespersec, play_nps_str);
     AddCommas(midifps, midifps_str);
     if(voicefetching)
-        printf("tick: %s / %s | played notes: %s / %s (%s/s) | bpm: %.2lf | midi thread: %s fps | %d voices        \r", curr_tick_str, maxtick_str, playednotes_str, totalnotes_str, play_nps_str, bpm, midifps_str, GetVoiceCount());
+        printf("tick: %s / %s | notes: %s / %s (%s/s) | bpm: %.2lf | midi thread: %s fps | %d voices        \r", curr_tick_str, maxtick_str, playednotes_str, totalnotes_str, play_nps_str, bpm, midifps_str, GetVoiceCount());
     else
-        printf("tick: %s / %s | played notes: %s / %s (%s/s) | bpm: %.2lf | midi thread: %s fps        \r", curr_tick_str, maxtick_str, playednotes_str, totalnotes_str, play_nps_str, bpm, midifps_str);
-    laststatsupdate = now;
+        printf("tick: %s / %s | notes: %s / %s (%s/s) | bpm: %.2lf | midi thread: %s fps        \r", curr_tick_str, maxtick_str, playednotes_str, totalnotes_str, play_nps_str, bpm, midifps_str);
+    laststatsupdate = noww;
 }
 
 void SubmitSysEx(SysExEvent sysex)
@@ -225,7 +224,6 @@ void StartPlayback(int singlethread)
             sysex++;
         }
         current_clock = clock;
-        UpdatePlaybackStats();
     }
     clock_start();
     AllNotesOFF();
