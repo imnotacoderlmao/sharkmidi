@@ -6,9 +6,9 @@
 #include <string.h>
 int main(int32_t argc, char* argv[])
 {
-    puts("===== sharkmidi commit #16 =====");
+    puts("===== sharkmidi commit #17 =====");
     puts("   optionally, you could add a file path after the executable for the it to load a midi immediately, like:\n   ./sharkmidi (single threaded playback) (midi directory)");
-    puts("   controls are:\n   up = zoom in, down = zoom out\n   right = seek fwd, left = seek back\n   space = start/pause playback\n   r = reset playback\n   u = unload midi\n   s = music sheet style\n   d = dynamic scroll speed\n   t = note transparency linear to velocity\n");
+    puts("   controls are:\n   up = zoom in, down = zoom out\n   right = seek fwd, left = seek back\n   space = start/pause playback\n   r = reset playback\n   u = unload midi\n   s = music sheet style\n   d = dynamic scroll speed\n   t = note transparency linear to velocity");
     puts("================================");
     
     setbuf(stdout, NULL); // just for printf to print everytime its called

@@ -327,7 +327,7 @@ void Renderer_Dispose(void)
 
 
 static inline void process_one_event(uint8_t* messages, int64_t offset, uint8_t status, uint8_t key, uint8_t track,
-    KeyHeader* keyheader, RenderNote* ringLocal, int maskLocal, int tick, int* headLocal)
+    KeyHeader* keyheader, RenderNote* ringLocal, int maskLocal, int64_t tick, int* headLocal)
 {
     uint32_t headerIdx = (track | (status & 0x0Fu)) << 7 | key;
     KeyHeader* header = &keyheader[headerIdx];
@@ -374,7 +374,7 @@ static const uint8_t KeyShuffleMaskBytes[16] __attribute__((aligned(16))) = {
 #endif
 
 static int64_t process_tick_events(uint8_t* messages, uint8_t* tracks, KeyHeader* keyheader,
-    RenderNote* ringLocal, int maskLocal, int64_t currentOffset, int64_t nextOffset, int tick, int* headLocal)
+    RenderNote* ringLocal, int maskLocal, int64_t currentOffset, int64_t nextOffset, int64_t tick, int* headLocal)
 {
 #if HAVE_SSSE3
     __m128i statusMask = _mm_load_si128((const __m128i*)StatusShuffleMaskBytes);
@@ -416,15 +416,15 @@ static int64_t process_tick_events(uint8_t* messages, uint8_t* tracks, KeyHeader
     return currentOffset;
 }
 
-static int32_t find_active_tick_idx(int32_t targetTick)
+static int64_t find_active_tick_idx(int64_t targetTick)
 {
-    int32_t low = 0;
-    int32_t high = (int32_t)activetickcount - 1;
-    int32_t ans = activetickcount;
+    int64_t low = 0;
+    int64_t high = (int64_t)activetickcount - 1;
+    int64_t ans = activetickcount;
 
     while (low <= high)
     {
-        int32_t mid = low + (high - low) / 2;
+        int64_t mid = low + (high - low) / 2;
         if (timingArr[mid].tick >= targetTick)
         {
             ans = mid;
@@ -436,20 +436,20 @@ static int32_t find_active_tick_idx(int32_t targetTick)
     return ans;
 }
 
-static void sweep_range(int fromTick, int toTick)
+static void sweep_range(int64_t fromTick, int64_t toTick)
 {
     if (activetickcount == 0 || timingArr == NULL) return;
 
     uint8_t* messages = (uint8_t*)eventArr;
     uint8_t* tracks = trackArr;
 
-    int limit = toTick < maxTick ? toTick : maxTick;
+    int64_t limit = toTick < maxTick ? toTick : maxTick;
     int headLocal = headIdx;
 
-    int32_t idx = find_active_tick_idx(fromTick);
+    int64_t idx = find_active_tick_idx(fromTick);
     while (idx < activetickcount && timingArr[idx].tick <= limit)
     {
-        int32_t tick = timingArr[idx].tick;
+        int64_t tick = timingArr[idx].tick;
         int64_t currentOffset = timingArr[idx].event_offset;
         int64_t nextOffset = timingArr[idx + 1].event_offset;
 

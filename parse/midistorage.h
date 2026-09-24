@@ -4,20 +4,20 @@
 #include <stdint.h>
 typedef struct
 {
-    int32_t tick;
-    int32_t notecount;
+    int64_t tick;
+    int64_t notecount;
     int64_t event_offset;
 } TickGroup;
 
 typedef struct 
 {
-    int32_t tick;
-    uint24_t microsec;
+    int64_t tick;
+    int32_t microsec;
 } TempoEvent;
 
 typedef struct 
 {
-    int32_t tick;
+    int64_t tick;
     int32_t size;
     uint8_t* message;
 } SysExEvent;
@@ -32,7 +32,7 @@ extern uint64_t totalnotes;
 extern uint32_t tempoCount;
 extern uint32_t sysexCount;
 extern uint32_t ppq;
-extern int32_t maxTick, activetickcount;
+extern int64_t maxTick, activetickcount;
 extern const char* filename;
 extern int filename_len;
 #endif

@@ -13,7 +13,7 @@ volatile int paused = 0, stopping = 1;
 int skipping = 0;
 int64_t npshistory[60];
 int npshistoryidx = 0;
-int32_t current_clock = 0;
+int64_t current_clock = 0;
 const double onesixtyh = 0.016666666;
 // oh god do i really have to abuse macros too
 #define MIN(a, b) (((a) < (b)) ? (a) : (b))
@@ -30,9 +30,9 @@ void clock_start(void)
 }
 
 static TempoEvent* g_tempo_cursor = NULL; 
-void SetBPM(uint24_t microsec)
+void SetBPM(int32_t microsec)
 {
-    bpm = 60000000.0 / uint24_get(&microsec);
+    bpm = 60000000.0 / microsec;
     tickscale = (bpm * ppq) / 60.0;
 }
 
@@ -92,6 +92,7 @@ void clock_pause(void)
     }
 }
 
+TickGroup* timing = NULL;
 double midifps = 0;
 void UpdatePlaybackStats()
 {   
@@ -102,7 +103,8 @@ void UpdatePlaybackStats()
         stopping = 1;
     
     midifps = 1 / delta;
-
+    
+    playednotes = timing->notecount;
     npshistoryidx = (npshistoryidx + 1) % 60;
     notespersec -= npshistory[npshistoryidx];
     npshistory[npshistoryidx] = playednotes - playednotes2;
@@ -122,12 +124,12 @@ void UpdatePlaybackStats()
 
 void SubmitSysEx(SysExEvent sysex)
 {
-    char sysex_str[64];
-    size_t offset = 0;
-    offset += snprintf(sysex_str + offset, 3, "%02X" , sysex.message[0]);
-    for(int32_t i = 1; i < sysex.size; i++)
-        offset += snprintf(sysex_str + offset, 4, "-%02X" , sysex.message[i]);
-    printf("\nSending Sysex Message: %s", sysex_str);
+    //char sysex_str[64];
+    //size_t offset = 0;
+    //offset += snprintf(sysex_str + offset, 3, "%02X" , sysex.message[0]);
+    //for(int32_t i = 1; i < sysex.size; i++)
+    //    offset += snprintf(sysex_str + offset, 4, "-%02X" , sysex.message[i]);
+    //printf("\nSending Sysex Message: %s", sysex_str);
     #if defined(_WIN32) || defined(_WIN64)
         MIDIHDR header = 
         {
@@ -169,22 +171,19 @@ void StartPlayback(int singlethread)
     if (!singlethread)
         audiothread_entry();
     uint24_t* eventptr = eventArr;
-    TickGroup* timing = timingArr;
+    timing = timingArr;
     g_tempo_cursor = tempoArr;
     SysExEvent* sysex = sysexArr;
-    size_t played = 0;
+    int64_t played = 0;
     clock_start();
     while(!stopping)
     {
-        int32_t clock = (int32_t)clock_getTick();
+        int64_t clock = (int64_t)clock_getTick();
         if (clock < current_clock)
         {
             while (timing > timingArr && timing->tick > clock)
-            {
                 timing--;
-                played = timing->event_offset;
-                playednotes -= timing->notecount;
-            }
+            played = timing->event_offset;
             while (sysex > sysexArr && sysex->tick > clock)
                 sysex--;
         }
@@ -212,7 +211,6 @@ void StartPlayback(int singlethread)
             }
             else
                 played = (timing + 1)->event_offset;
-            playednotes += timing->notecount;
             // this feels frankenstein, but its a way for smooth scrolling under throttle
             current_clock = timing->tick;
             UpdatePlaybackStats();
