@@ -1,4 +1,3 @@
-// typed-array.h
 #define DEFINE_ARRAY(T)                                                      \
 typedef struct                                                               \
 {                                                                            \

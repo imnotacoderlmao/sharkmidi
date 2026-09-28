@@ -147,7 +147,7 @@ static void glfw_error_callback(int code, const char* desc)
 }
 
 double delta_time = 0.0, last_time = 0.0;
-int fps = 0;
+int fps = 0, targetfps = 0;
 
 static void limitframerateto(int target_fps)
 {
@@ -208,6 +208,8 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
             stationarynotes = stationarynotes? 0 : 1;
             if (stationarynotes) scrollfactor = (int)(WindowTicks / ppq);
         }
+        if (key == GLFW_KEY_V)
+            targetfps = targetfps? 0 : glfwGetVideoMode(glfwGetPrimaryMonitor())->refreshRate;
     }
     if (key == GLFW_KEY_RIGHT)
         clock_skip(tickscale, 0);
@@ -343,7 +345,9 @@ void Window_Run(const char* filepath)
 
     const int PAD = 20;
     glfwSetDropCallback(win, drop_callback);
+    targetfps = glfwGetVideoMode(glfwGetPrimaryMonitor())->refreshRate;
     last_time = get_time();
+    
     while (!glfwWindowShouldClose(win))
     {
         delta_time = get_time() - last_time;
@@ -354,7 +358,7 @@ void Window_Run(const char* filepath)
         glfwGetFramebufferSize(win, &fbWidth, &fbHeight);
         glViewport(0, 0, fbWidth, fbHeight);
 
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        glClear(GL_COLOR_BUFFER_BIT);
 
         if (midiloaded)
             Renderer_Render(fbWidth, fbHeight, current_clock, PAD);
@@ -378,7 +382,7 @@ void Window_Run(const char* filepath)
 
         glfwSwapBuffers(win);
         glfwPollEvents();
-        limitframerateto(60);
+        limitframerateto(targetfps);
     }
     stopping = 1;
 }
