@@ -13,7 +13,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-int singlethread = 1;
+#define MIN(a, b) (((a) < (b)) ? (a) : (b))
+#define MAX(a, b) (((a) > (b)) ? (a) : (b))
+
 int dynascroll = 0;
 double scrollfactor = 1.0;
 typedef struct
@@ -201,15 +203,21 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
         if (key == GLFW_KEY_D)
         {
             dynascroll = dynascroll? 0 : 1;
-            if (dynascroll) scrollfactor = (int)(WindowTicks / tickscale);
+            if (dynascroll) scrollfactor = MAX((int)(WindowTicks / tickscale), 1);
         }
         if (key == GLFW_KEY_S)
         {
             stationarynotes = stationarynotes? 0 : 1;
-            if (stationarynotes) scrollfactor = (int)(WindowTicks / ppq);
+            if (stationarynotes) scrollfactor = MAX((int)(WindowTicks / ppq), 1);
         }
         if (key == GLFW_KEY_V)
             targetfps = targetfps? 0 : glfwGetVideoMode(glfwGetPrimaryMonitor())->refreshRate;
+        if (key == GLFW_KEY_Q)
+        {
+            clock_pause();
+            reinitsynths();
+            clock_pause();   
+        }
     }
     if (key == GLFW_KEY_RIGHT)
         clock_skip(tickscale, 0);
@@ -222,12 +230,12 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
         if (dynascroll)
         {
             if (scrollfactor <= 0.5)
-                scrollfactor /= 2;
+                scrollfactor = MAX(scrollfactor / 2, 0.1);
             else
                 scrollfactor -= 0.1; 
         }
         else if (stationarynotes)
-            scrollfactor -= 1;
+            scrollfactor = MAX(scrollfactor - 1, 1);
         else
             WindowTicks /= 1.1;
     }
@@ -367,10 +375,8 @@ void Window_Run(const char* filepath)
             WindowTicks = (int)(tickscale * scrollfactor);
         else if (stationarynotes)
             WindowTicks = (int)(ppq * scrollfactor);
-
-        if (!stopping)
-            UpdatePlaybackStats();
-
+        
+        UpdatePlaybackStats();
         AddCommas(fps, rendererfps_str);
         AddCommas(NotesDrawnLastFrame, quad_on_screen_str);            
         Text_Draw(fbWidth, fbHeight, 5, 4, 1.75f, 0.0f, 1.0f, 0.0f,

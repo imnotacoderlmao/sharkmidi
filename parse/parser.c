@@ -380,11 +380,16 @@ int64_t ParseTrackEvents(uint8_t* trackPtr, uint8_t* trackEnd, uint24_t* msgPtr,
                         int64_t size = *trackPtr++;
                         if(size >= 0x80)
                             size = varlen_decode_slow(&size, &trackPtr);
-                        
                         uint8_t* data = malloc(size + 1);
                         data[0] = readEvent;
                         for (uint32_t i = 1; i < (uint32_t)(size + 1); i++)
                             data[i] = *trackPtr++;
+                        
+                        uint8_t sysextoignore[] = {0xF0,0x7E,0x7F,0x09,0x01,0xF7};
+                        
+                        if (memcmp(data, sysextoignore, sizeof(sysextoignore)) == 0) 
+                            continue; 
+                        
                         SysExEvent sex = {absolutetime, size + 1, data};
                         #ifdef _OPENMP
                             #pragma omp critical

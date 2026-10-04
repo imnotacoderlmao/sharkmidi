@@ -8,6 +8,7 @@ char curr_tick_str[24] = "0", midifps_str[24] = "0";
 char rendererfps_str[24] = "0", quad_on_screen_str[24] = "0";
 char maxtick_str[24] = "0", trackamount_str[24] = "0";
 char loadedtracks_str[24] = "0", play_nps_str[24] = "0";
+char voicecount_str[24] = "0";
 
 void __attribute__((noinline)) AddCommas(int64_t n, char output[24]) 
 {

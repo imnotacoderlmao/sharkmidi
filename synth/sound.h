@@ -10,11 +10,12 @@
 #else
     extern int32_t (*SendDirectLongData)(uint8_t* message, int32_t messagesize);
 #endif
-int32_t Sound_Init(int32_t singlethread);
+int32_t Sound_Init(int32_t singlethreaded);
 void AllNotesOFF(void);
 extern void (*SendDirectData)(uint32_t message);
 extern void audiothread_entry(void);
-extern int issynthinitiated;
+extern void reinitsynths(void);
+extern int issynthinitiated, singlethread;
 extern int32_t (*GetVoiceCount)(void);
 extern uint24_t* ringbuffer;
 extern int32_t voicefetching;

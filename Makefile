@@ -1,6 +1,6 @@
 CC ?= gcc
 CFLAGS = -O3 -fstrict-overflow -fno-math-errno -fno-stack-protector
-LDFLAGS = -pthread -flto
+LDFLAGS = -pthread
 
 # for cross compilation purposes
 IS_MINGW = $(shell $(CC) -dumpmachine 2>&1 | grep -E "mingw|w64")
@@ -13,9 +13,8 @@ else
     ifeq (${GLFW_WIN_DIR},)
         $(error GLFW_WIN_DIR not set. stopping compilation)
     endif
-    LDFLAGS += -mwindows -lopengl32 -lkernel32
+    LDFLAGS += -L$(GLFW_WIN_DIR)/lib-mingw-w64 -lglfw3 -mconsole -lopengl32 -lkernel32 -lgdi32 -luser32 -lkernel32
     CFLAGS += -I$(GLFW_WIN_DIR)/include
-    LDFLAGS += -L$(GLFW_WIN_DIR)/lib-mingw-w64 -lglfw3
 endif
 
 native = $(shell echo $(do_compile_native) | tr A-Z a-z)
@@ -40,6 +39,7 @@ OBJS = $(patsubst %.c, build/%.o, $(SRCS))
 
 ifeq ($(strip $(IS_MINGW)),)
     TARGET = build/sharkmidi
+    LDFLAGS += -flto
 else
     TARGET = build/sharkmidi.exe
 endif

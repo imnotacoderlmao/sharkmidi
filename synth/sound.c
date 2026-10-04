@@ -12,12 +12,12 @@ void (*SendDirectData)(uint32_t message);
     int32_t (*PrepareLongData)(MIDIHDR* hdr, int32_t hdrsize);
     int32_t (*UnprepareLongData)(MIDIHDR* hdr, int32_t hdrsize);
 #else
-    int32_t (*SendDirectLongData)(uint8_t* message, int32_t messagesize);    
+    int32_t (*SendDirectLongData)(uint8_t* message, int32_t messagesize);
 #endif
 int32_t (*GetVoiceCount)(void);
 uint24_t* ringbuffer = NULL;
 int32_t voicefetching = 0;
-int issynthinitiated = 0;
+int issynthinitiated = 0, singlethread = 0;
 volatile uint32_t writeptr = 0;
 volatile uint32_t readptr = 0;
 const uint32_t RINGBUFFER_SIZE = 2097152;
@@ -37,8 +37,6 @@ void* audiothread(void* args)
             readptr = (readptr + 1) & RINGBUFFER_MASK;
         }
     }
-    free(ringbuffer);
-    ringbuffer = NULL;
     return NULL;
 }
 
@@ -47,9 +45,9 @@ void audiothread_entry(void)
     pthread_create(&audio_thread, NULL, audiothread, NULL);
 }
 
-int32_t Sound_Init(int32_t singlethread) 
+int32_t Sound_Init(int32_t singlethreaded) 
 {
-    if(!KDMAPI_Setup()){ printf("\nThis program requires OmniMIDI to have functioning audio!\n"); return 0; };
+    if(!KDMAPI_Setup()){ printf("\nThis program requires OmniMIDI or a KDMAPI capable synth to have functioning audio!\n"); return 0; };
 
     KDMAPI_InitializeKDMAPIStream();
     SendDirectData = KDMAPI_SendDirectData;
@@ -59,8 +57,9 @@ int32_t Sound_Init(int32_t singlethread)
         PrepareLongData = KDMAPI_PrepareLongData;
         UnprepareLongData = KDMAPI_UnprepareLongData;
     #endif
-    printf("singlethread is %s.\n", singlethread? "TRUE" : "FALSE");
-    if (!singlethread) 
+    printf("singlethread is %s.\n", singlethreaded? "TRUE" : "FALSE");
+    singlethread = singlethreaded;
+    if (!singlethreaded) 
         ringbuffer = (uint24_t*)calloc(RINGBUFFER_SIZE, sizeof(uint24_t));
     if(hasvoice)
         voicefetching = 1;
@@ -68,8 +67,23 @@ int32_t Sound_Init(int32_t singlethread)
     return 1;
 }
 
+void Sound_Close(void)
+{
+    KDMAPI_TerminateKDMAPIStream();
+    issynthinitiated = 0;
+    voicefetching = 0;
+    if (ringbuffer != NULL)
+        free(ringbuffer);
+}
+
 void AllNotesOFF(void)
 {
     for (int channel = 0; channel < 16; channel++)
         SendDirectData((uint32_t)(0xB0 | channel) | (0x7B << 8));
+}
+
+void reinitsynths(void)
+{
+    Sound_Close();
+    Sound_Init(singlethread);
 }
