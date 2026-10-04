@@ -60,7 +60,7 @@ int32_t Sound_Init(int32_t singlethreaded)
     printf("singlethread is %s.\n", singlethreaded? "TRUE" : "FALSE");
     singlethread = singlethreaded;
     if (!singlethreaded) 
-        ringbuffer = (uint24_t*)calloc(RINGBUFFER_SIZE, sizeof(uint24_t));
+        ringbuffer = (uint24_t*)calloc(RINGBUFFER_SIZE + 1, sizeof(uint24_t));
     if(hasvoice)
         voicefetching = 1;
     issynthinitiated = 1;

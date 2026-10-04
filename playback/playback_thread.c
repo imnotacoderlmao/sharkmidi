@@ -115,7 +115,6 @@ void UpdatePlaybackStats()
     AddCommas(playednotes, playednotes_str);
     AddCommas(notespersec, play_nps_str);
     AddCommas(midifps, midifps_str);
-    laststatsupdate = noww;
     if (voicefetching)
     {
         AddCommas(GetVoiceCount(), voicecount_str);
@@ -123,6 +122,7 @@ void UpdatePlaybackStats()
     }    
     else
         printf("tick: %s / %s | notes: %s / %s (%s/s) | bpm: %.2lf | midi thread: %10s fps    \r", curr_tick_str, maxtick_str, playednotes_str, totalnotes_str, play_nps_str, bpm, midifps_str);
+    laststatsupdate = noww;
 }
 
 void SubmitSysEx(SysExEvent sysex)
@@ -230,6 +230,9 @@ void StartPlayback(int singlethread)
     AllNotesOFF();
     uint8_t rolandreset[] = {0xF0, 0x41, 0x10, 0x42, 0x12, 0x40, 0x00, 0x7F, 0x00, 0x41, 0xF7};
     SubmitSysEx((SysExEvent){0, 11, rolandreset});    
-    playednotes = 0, playednotes2 = 0;
+    playednotes = 0, playednotes2 = 0, notespersec = 0;
+    memset(npshistory, 0, 60 * sizeof(int64_t));
+    AddCommas(0, playednotes_str);
+    AddCommas(0, play_nps_str);
     puts("\nPlayback finished...");
 }

@@ -7,9 +7,9 @@
 int main(int32_t argc, char* argv[])
 {
     char welcome[] = 
-    "========== sharkmidi commit #19 ==========\n"
+    "========== sharkmidi commit #20 ==========\n"
     "optionally, you could add a file path after the executable for the it to load a midi immediately, like:\n"
-    "   ./sharkmidi (single threaded playback) (midi directory)\n"
+    "   ./sharkmidi (single threaded playback) (midi file directory)\n"
     "controls are:\n"   
     "   up = zoom in, down = zoom out\n"
     "   right = seek fwd, left = seek back\n"

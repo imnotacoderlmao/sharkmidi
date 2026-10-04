@@ -11,6 +11,7 @@
 #include <sys/stat.h>
 #include <string.h>
 #include <stdatomic.h>
+#include <stdarg.h>
 
 #ifdef _OPENMP
     #include <omp.h>
@@ -478,34 +479,34 @@ void printparsestatistics(void)
 {
     char parsestatistics[] =
     "=============== PARSE STATICTICS ===============\n"
-    "   MIDI Name: %s\n"
-    "   Filesize:  %s Bytes\n"
+    "   MIDI Name:              %s\n"
+    "   Filesize:               %s Bytes\n"
     "   Took:\n"
-    "       Count: %lfs (%s notes/s)\n"
-    "       Parse: %lfs (%s notes/s)\n"
-    "   Counted:\n"
-    "       MIDI Tracks: %s\n"
-    "       MIDI Ticks:  %s (%ld has events)\n"
-    "       Channel Events: %s\n"
-    "       Note Events:  %s\n"
-    "       Tempo Events: %s\n"
-    "       SysEx Events: %s\n"
+    "       Count:              %lfs (%s notes/s)\n"
+    "       Parse:              %lfs (%s notes/s)\n"
+    "   Properties:\n"
+    "       PPQ / Ticks:        %s / %s (%ld has events)\n"
+    "       Tracks:             %s\n"
+    "       Channel Events:     %s\n"
+    "       Note ON Events:     %s\n"
+    "       Tempo Events:       %s\n"
+    "       SysEx Events:       %s\n"
     "   Memory Usage:\n"
-    "       Timing:         %s Bytes (24 bytes/entry)\n"
-    "       Events:         %s Bytes (3 bytes/event)\n"
-    "       Track Index:    %s Bytes (1 byte/event)\n"
+    "       Timing:             %s Bytes (24 bytes/entry)\n"
+    "       Events:             %s Bytes (3 bytes/event)\n"
+    "       Track Index:        %s Bytes (1 byte/event)\n"
     "===============================================\n";
     // dear god
     char filesize_str[24];
     char scan_nps_str[24], parse_nps_str[24];
-    char eventcount_str[24];
+    char eventcount_str[24], ppq_str[24];
     char tempocount_str[24], sysexcount_str[24];
     char timeline_bytes[24], events_bytes[24], track_bytes[24];
     AddCommas(fileLen, filesize_str);
     AddCommas(trackAmount, trackamount_str);
     AddCommas(maxTick, maxtick_str);
     AddCommas(eventcount, eventcount_str);
-    AddCommas(totalnotes, totalnotes_str);
+    AddCommas(ppq, ppq_str);
     AddCommas((totalnotes / counttime), scan_nps_str);
     AddCommas((totalnotes / parsetime), parse_nps_str);
     AddCommas(tempoCount, tempocount_str);
@@ -514,10 +515,37 @@ void printparsestatistics(void)
     AddCommas(eventcount * sizeof(uint24_t), events_bytes);
     AddCommas(eventcount * sizeof(uint8_t), track_bytes);
     printf(parsestatistics, filename, filesize_str, counttime, scan_nps_str, 
-        parsetime, parse_nps_str, trackamount_str, maxtick_str, activetickcount, 
+        parsetime, parse_nps_str, ppq_str, maxtick_str, activetickcount, trackamount_str,
         eventcount_str, totalnotes_str, tempocount_str, sysexcount_str,
         timeline_bytes, events_bytes, track_bytes);
 }
+
+static char status_buf[512];
+void updatestatsandprint(const char* fmt, ...)
+{
+    va_list args;
+    char temp[512];
+
+    va_start(args, fmt);
+    vsnprintf(temp, sizeof(temp), fmt, args);
+    va_end(args);
+
+    fputs(temp, stdout);
+    fflush(stdout);
+
+    char *src = temp, *dst = status_buf;
+    while (*src)
+    {
+        if (*src != '\n' && *src != '\r')
+            *dst++ = *src;
+        src++;
+    }
+    *dst = '\0';
+
+    filename = strdup(status_buf);
+}
+
+
 
 TempoEvent_arr tempos = {0};
 SysExEvent_arr sysexs = {0};
@@ -525,22 +553,27 @@ SysExEvent_arr sysexs = {0};
 int LoadMIDI(const char* filepath)
 {
     UnloadMIDI();
-    printf("loading %s or something\n", filepath);
+    updatestatsandprint("initiating memory mapped file\n");
+    
     if (!InitMMF(filepath)) 
         return midiloaded;
+        
     VerifyHeader();
     maxTick = 0;
     trackProperties_arr tracks = {0};
+    
     while(filePos < fileLen)
     {
         if (!IndexTrack(&tracks))
             break;
-        printf("\rfound %d tracks", trackAmount);
+        updatestatsandprint("\rfound %d tracks", trackAmount);
     }
-    puts("\ncounting events");
+    updatestatsandprint("\ncounting events\n");
+
     TickGroup_arr* histogram = calloc(trackAmount, sizeof(TickGroup_arr));
     double start = get_time();
     int32_t loadedtracks = 0;
+    
     #ifdef _OPENMP
         #pragma omp parallel for
     #endif
@@ -550,15 +583,19 @@ int LoadMIDI(const char* filepath)
         uint8_t* trackstart = filePtr + currtrack->start;
         add(eventcount, CountTrackEvents(trackstart, trackstart + currtrack->length, &histogram[i]));
         add(loadedtracks, 1);
+        AddCommas(totalnotes, totalnotes_str);
         printf("(%d/%d) tracks scanned, %ld notes counted\r", loadedtracks, trackAmount, totalnotes);
+        fflush(stdout);
     }
     double end = get_time();
     counttime = end - start;
-    puts("\ncounting active ticks");
+
+    updatestatsandprint("\ncounting active ticks\n");
     int64_t total_entries = 0;
     for (int32_t i = 0; i < trackAmount; i++)
         total_entries += histogram[i].count;
-    puts("concatenating per-track timing array");
+
+    updatestatsandprint("concatenating per track timing array\n");
     TickGroup* flat = malloc(total_entries * sizeof(TickGroup));
     int64_t flat_idx = 0;
     for (int32_t i = 0; i < trackAmount; i++)
@@ -572,7 +609,8 @@ int LoadMIDI(const char* filepath)
     }
     free(histogram);
     histogram = NULL;
-    puts("sorting timing array by tick");
+
+    updatestatsandprint("sorting timing array by tick\n");
     qsort(flat, total_entries, sizeof(TickGroup), cmp_tickgroup);
 
     activetickcount = 0;
@@ -585,7 +623,8 @@ int LoadMIDI(const char* filepath)
                 activetickcount++;
         }
     }
-    puts("creating main timing array");
+
+    updatestatsandprint("creating main timing array\n");
     timingArr = calloc(activetickcount + 1, sizeof(TickGroup));
     int64_t* writeCursors = calloc(activetickcount + 1, sizeof(int64_t));
 
@@ -628,14 +667,16 @@ int LoadMIDI(const char* filepath)
     }
     free(flat);
     flat = NULL;
-    puts("creating main event array");
+
+    updatestatsandprint("creating main event array\n");
     eventArr = calloc(eventcount + 1, sizeof(uint24_t));
     trackArr = calloc(eventcount + 1, sizeof(uint8_t));
 
     loadedtracks = 0;
-    totalnotes = 0;
-    puts("actually parsing events this time");
+    updatestatsandprint("actually parsing events this time\n");
+    int64_t loadednotes = 0;
     start = get_time();
+    
     #ifdef _OPENMP
         #pragma omp parallel for
     #endif
@@ -643,14 +684,16 @@ int LoadMIDI(const char* filepath)
     {
         trackProperties* currtrack = &tracks.data[i];
         uint8_t* trackstart = filePtr + currtrack->start;
-        add(totalnotes, ParseTrackEvents(trackstart, trackstart + currtrack->length, eventArr, trackArr, writeCursors, &tempos, &sysexs, (i << 4)))
+        add(loadednotes, ParseTrackEvents(trackstart, trackstart + currtrack->length, eventArr, trackArr, writeCursors, &tempos, &sysexs, (i << 4)))
         add(loadedtracks, 1);
-        printf("(%d/%d) tracks parsed, %ld notes parsed\r", loadedtracks, trackAmount, totalnotes);
+        AddCommas(loadednotes, playednotes_str);
+        printf("(%d/%d) tracks parsed, %s notes parsed\r", loadedtracks, trackAmount, playednotes_str);
+        fflush(stdout);
     }
     end = get_time();    
 
-    puts("adding dummy events and sorting sysex, tempos");
-    // sentinels
+    AddCommas(0, playednotes_str);
+    updatestatsandprint("\nfinalizing events and sorting metadata\n");
     timingArr[activetickcount] = (TickGroup){INT32_MAX, (int32_t)totalnotes, (int64_t)eventcount};
     TempoEvent tev = {INT64_MAX, 500000};
     TempoEvent_arr_push(&tempos, tev);
@@ -684,6 +727,7 @@ void UnloadMIDI(void)
     totalnotes = 0;
     eventcount = 0;
     activetickcount = 0;
+    AddCommas(0, totalnotes_str);
     free((void*)filename); 
     filename = "no midi loaded";
     filename_len = 0;
