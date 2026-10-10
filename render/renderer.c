@@ -159,7 +159,7 @@ GLuint build_shader(const char* vert, const char* frag)
 
 static const GLbitfield storageFlags = GL_MAP_WRITE_BIT | GL_MAP_READ_BIT |
     GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT;
-static const GLbitfield accessFlags = storageFlags; // same bits, different call sites in GL API
+static const GLbitfield accessFlags = storageFlags;
 
 static void bind_vertex_attribs(void)
 {
@@ -292,6 +292,7 @@ void Renderer_InitForMIDI(void)
     lastWindowTicks = -1;
     paletteUploadPending = 1;
     isInitialized = 1;
+    puts("renderer is ready");
 }
 
 void Renderer_ResetForUnload(void)
@@ -324,7 +325,6 @@ void Renderer_Dispose(void)
     glDeleteVertexArrays(1, &cursorVAO);
     glDeleteProgram(cursorShader);
 }
-
 
 static inline void process_one_event(uint8_t* messages, int64_t offset, uint8_t status, uint8_t key, uint8_t track,
     KeyHeader* keyheader, RenderNote* ringLocal, int maskLocal, int64_t tick, int* headLocal)
@@ -373,14 +373,14 @@ static const uint8_t KeyShuffleMaskBytes[16] __attribute__((aligned(16))) = {
 };
 #endif
 
-static int64_t process_tick_events(uint8_t* messages, uint8_t* tracks, KeyHeader* keyheader,
-    RenderNote* ringLocal, int maskLocal, int64_t currentOffset, int64_t nextOffset, int64_t tick, int* headLocal)
+static int64_t process_run_events(uint8_t* messages, uint8_t track, KeyHeader* keyheader,
+    RenderNote* ringLocal, int maskLocal, int64_t currentOffset, int64_t runEnd, int64_t tick, int* headLocal)
 {
 #if HAVE_SSSE3
     __m128i statusMask = _mm_load_si128((const __m128i*)StatusShuffleMaskBytes);
     __m128i keyMask    = _mm_load_si128((const __m128i*)KeyShuffleMaskBytes);
 
-    while (nextOffset - currentOffset >= 4)
+    while (runEnd - currentOffset >= 4)
     {
         uint8_t* synthev = messages + currentOffset * 3;
         __m128i raw = _mm_lddqu_si128((const __m128i*)synthev);
@@ -390,13 +390,11 @@ static int64_t process_tick_events(uint8_t* messages, uint8_t* tracks, KeyHeader
 
         uint32_t statusPacked = (uint32_t)_mm_cvtsi128_si32(statusVec);
         uint32_t keyPacked    = (uint32_t)_mm_cvtsi128_si32(keyVec);
-        uint32_t trackPacked  = tracks != NULL ? *(uint32_t*)(tracks + currentOffset) : 0;
 
         for (int lane = 0; lane < 4; lane++)
         {
             uint8_t status = (uint8_t)(statusPacked >> (lane * 8));
             uint8_t key    = (uint8_t)(keyPacked >> (lane * 8));
-            uint8_t track  = (uint8_t)(trackPacked >> (lane * 8));
 
             process_one_event(messages, currentOffset + lane, status, key, track,
                 keyheader, ringLocal, maskLocal, tick, headLocal);
@@ -405,10 +403,9 @@ static int64_t process_tick_events(uint8_t* messages, uint8_t* tracks, KeyHeader
     }
 #endif
 
-    while (currentOffset < nextOffset)
+    while (currentOffset < runEnd)
     {
         uint8_t* synthev = messages + currentOffset * 3;
-        uint8_t track = tracks != NULL ? tracks[currentOffset] : 0;
         process_one_event(messages, currentOffset, synthev[0], synthev[1], track,
             keyheader, ringLocal, maskLocal, tick, headLocal);
         currentOffset++;
@@ -436,21 +433,47 @@ static int64_t find_active_tick_idx(int64_t targetTick)
     return ans;
 }
 
+static int64_t find_track_group_idx(int64_t targetOffset)
+{
+    int64_t low = 0;
+    int64_t high = (int64_t)trackGroups.count - 1;
+    int64_t ans = 0;
+
+    while (low <= high)
+    {
+        int64_t mid = low + (high - low) / 2;
+        if (trackGroups.data[mid].event_offset <= targetOffset)
+        {
+            ans = mid;
+            low = mid + 1;
+        }
+        else
+            high = mid - 1;
+    }
+    return ans;
+}
+
 static void sweep_range(int64_t fromTick, int64_t toTick)
 {
     if (activetickcount == 0 || timingArr == NULL) return;
 
     uint8_t* messages = (uint8_t*)eventArr;
-    uint8_t* tracks = trackArr;
 
     int64_t limit = toTick < maxTick ? toTick : maxTick;
     int headLocal = headIdx;
 
     int64_t idx = find_active_tick_idx(fromTick);
+    if (idx >= activetickcount) return;
+
+    int64_t currentOffset = timingArr[idx].event_offset;
+    int64_t groupIdx = (trackGroups.data && trackGroups.count > 0) ? find_track_group_idx(currentOffset) : 0;
+
+    while ((groupIdx < trackGroups.count) && (trackGroups.data[groupIdx].event_offset + trackGroups.data[groupIdx].count <= currentOffset))
+        groupIdx++;
+
     while (idx < activetickcount && timingArr[idx].tick <= limit)
     {
         int64_t tick = timingArr[idx].tick;
-        int64_t currentOffset = timingArr[idx].event_offset;
         int64_t nextOffset = timingArr[idx + 1].event_offset;
 
         while (headLocal - tailIdx + (nextOffset - currentOffset) >= mask + 1)
@@ -458,12 +481,40 @@ static void sweep_range(int64_t fromTick, int64_t toTick)
             headIdx = headLocal;
             resize_ring((mask + 1) * 2);
         }
-        currentOffset = process_tick_events(messages, tracks, keyHeaders, ring, mask,
-            currentOffset, nextOffset, tick, &headLocal);
+
+        if (trackGroups.data == NULL || trackGroups.count == 0)
+        {
+            currentOffset = process_run_events(messages, 0, keyHeaders, ring, mask,
+                currentOffset, nextOffset, tick, &headLocal);
+        }
+        else
+        {
+            while (currentOffset < nextOffset)
+            {
+                if (groupIdx >= trackGroups.count)
+                {
+                    currentOffset = process_run_events(messages, 0, keyHeaders, ring, mask,
+                        currentOffset, nextOffset, tick, &headLocal);
+                    break;
+                }
+
+                TrackGroup* group = &trackGroups.data[groupIdx];
+                int64_t runEnd = group->event_offset + group->count;
+                if (runEnd > nextOffset) runEnd = nextOffset;
+
+                uint8_t track = group->track;
+                currentOffset = process_run_events(messages, track, keyHeaders, ring, mask,
+                    currentOffset, runEnd, tick, &headLocal);
+
+                if (currentOffset >= group->event_offset + group->count)
+                    groupIdx++;
+            }
+        }
         idx++;
     }
     headIdx = headLocal;
 }
+
 static void advance_tail(int viewStart)
 {
     int safeTail = headIdx - ringCap;

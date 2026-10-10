@@ -20,27 +20,20 @@
     #define add(a, b) a += b;     
 #endif
 
-static inline long get_next_pos(int64_t absolutetime, uint32_t* active_idx, int64_t* writeCursors)
-{
-    while (timingArr[*active_idx].tick < absolutetime)
-    {
-        (*active_idx)++;
-    }
-#ifdef _OPENMP
-    return __atomic_fetch_add(&writeCursors[*active_idx], 1, __ATOMIC_RELAXED);
-#else
-    return writeCursors[*active_idx]++;
-#endif
-}
-
 typedef struct
 {
     int64_t start;
     uint32_t length;
 } trackProperties;
 
-#define true 1
-#define false 0
+typedef struct
+{
+    int64_t tick;
+    uint32_t count;
+    uint32_t notecount;
+    uint16_t track;
+    uint32_t group_idx;
+} ExtendedTickGroup;
 
 uint8_t* filePtr = NULL;
 uint64_t fileLen = 0;
@@ -51,10 +44,58 @@ uint16_t trackAmount = 0;
 uint32_t fmt = 0;
 int32_t midiloaded = 0, trackcolors = 1;
 uint64_t eventcount = 0;
+
 DEFINE_ARRAY(trackProperties);
 DEFINE_ARRAY(TickGroup);
 DEFINE_ARRAY(TempoEvent);
 DEFINE_ARRAY(SysExEvent);
+
+const char* getfilename(const char* filedir) {
+    int i = strlen(filedir) - 1;
+    while (i >= 0) {
+        if (filedir[i] == '/' || filedir[i] == '\\') {
+            break;
+        }
+        i--;
+    }
+
+    const char* start_ptr = filedir + (i + 1);
+    filename_len = strlen(start_ptr) + 1;
+    char* filename = malloc((filename_len + 1) * sizeof(char));
+    strcpy(filename, start_ptr);
+    if(filename_len > 32)
+        filename[filename_len-1] = ' ';
+    filename[filename_len] = '\0';
+    
+    return filename;
+}
+
+static char status_buf[512];
+static char static_filename_buf[512];
+void updatestatsandprint(const char* fmt, ...)
+{
+    va_list args;
+    char temp[512];
+
+    va_start(args, fmt);
+    vsnprintf(temp, sizeof(temp), fmt, args);
+    va_end(args);
+
+    fputs(temp, stdout);
+    fflush(stdout);
+
+    char *src = temp, *dst = status_buf;
+    while (*src)
+    {
+        if (*src != '\n' && *src != '\r')
+            *dst++ = *src;
+        src++;
+    }
+    *dst = '\0';
+
+    snprintf(static_filename_buf, sizeof(static_filename_buf), "%s", status_buf);
+    filename = static_filename_buf;
+}
 
 #if defined(_WIN32) || defined(_WIN64)
 #include <windows.h>
@@ -70,7 +111,7 @@ int InitMMF(const char* filepath)
     GetFileSizeEx(filehandle, &fileSize);
     if (filehandle == INVALID_HANDLE_VALUE)
     {
-        puts("error getting file properties, does the file even exist?");
+        updatestatsandprint("error getting file properties, does the file even exist?");
         CloseHandle(filehandle);
         return 0;
     }
@@ -90,7 +131,7 @@ int InitMMF(const char* filepath)
     int filedesc = open(filepath, O_RDONLY);
     if (fstat(filedesc, &filestat) == -1)
     {
-        puts("error getting filesize, does the file even exist?");
+        updatestatsandprint("error getting filesize, does the file even exist?\n");
         close(filedesc);
         return 0;
     }
@@ -105,15 +146,17 @@ int InitMMF(const char* filepath)
 
 int64_t __attribute__((noinline)) varlen_decode_slow(int64_t* len, uint8_t** trackPtr)
 {
-    *len &= 0x7F;
-    uint8_t b = 0;
-    do 
-    { 
-        b = *((*trackPtr)++);
-        *len = (*len << 7) | (b & 0x7F); 
-    } 
-    while (b >= 0x80);
-    return *len;
+    uint8_t b = *(*trackPtr)++;
+    int64_t val = ((*len & 0x7F) << 7) | (b & 0x7F);
+    if (!(b & 0x80)) return (*len = val);
+
+    b = *(*trackPtr)++;
+    val = (val << 7) | (b & 0x7F);
+    if (!(b & 0x80)) return (*len = val);
+
+    b = *(*trackPtr)++;
+    val = (val << 7) | (b & 0x7F);
+    return (*len = val);
 }
 
 static uint32_t ReadUInt32(void)
@@ -132,38 +175,19 @@ static uint16_t ReadUInt16(void)
     return __builtin_bswap16(val);
 }
 
-const char* getfilename(const char* filedir) {
-    int i = strlen(filedir) - 1;
-    while (i >= 0) {
-        if (filedir[i] == '/' || filedir[i] == '\\') {
-            break;
-        }
-        i--;
-    }
-
-    const char* start_ptr = filedir + (i + 1);
-    filename_len = strlen(start_ptr) + 1;
-    char* filename = malloc((filename_len + 1) * sizeof(char));
-    strcpy(filename, start_ptr);
-    if(filename_len > 32)
-        filename[filename_len-1] = ' ';
-    filename[filename_len] = '\0';
-    return filename;
-}
-
 static int SearchText(char* text)
 {
     for (int32_t i = 0; i < strlen(text); i++)
     {
         if (filePos >= fileLen) 
-            return false;
+            return 0;
         if (filePtr[filePos++] != text[i])
         {
             printf("issue searching for %s\n", text);
-            return false;
+            return 0;
         }
     }
-    return true;
+    return 1;
 }
 
 static void VerifyHeader()
@@ -194,15 +218,15 @@ int IndexTrack(trackProperties_arr* tracklistptr)
         trackProperties_arr_push(tracklistptr, track);
         filePos += size;
         trackAmount++;
-        return true;
+        return 1;
     }
-    return false;
+    return 0;
 }
 
-static int cmp_tickgroup(const void* a, const void* b)
+static int cmp_extended_tickgroup(const void* a, const void* b)
 {
-    int64_t posa = ((const TickGroup*)a)->tick;
-    int64_t posb = ((const TickGroup*)b)->tick;
+    int64_t posa = ((const ExtendedTickGroup*)a)->tick;
+    int64_t posb = ((const ExtendedTickGroup*)b)->tick;
     return (posa > posb) - (posa < posb);
 }
 
@@ -265,19 +289,17 @@ int64_t CountTrackEvents(uint8_t* trackPtr, uint8_t* trackEnd, TickGroup_arr* ti
                 switch (readEvent)
                 {
                     case 0xF0:
-                        {
-                            int64_t len = *trackPtr++;
-                            if (len >= 0x80)
-                                varlen_decode_slow(&len, &trackPtr);
-                            trackPtr += len;
-                        }
+                    {
+                        int64_t len = *trackPtr++;
+                        if (len >= 0x80)
+                            varlen_decode_slow(&len, &trackPtr);
+                        trackPtr += len;
                         continue;
-                    case 0xF1: 
-                        trackPtr += 1; 
-                        continue;
+                    }
                     case 0xF2: 
                         trackPtr += 2; 
                         continue;
+                    case 0xF1:
                     case 0xF3: 
                         trackPtr += 1; 
                         continue;
@@ -307,10 +329,7 @@ int64_t CountTrackEvents(uint8_t* trackPtr, uint8_t* trackEnd, TickGroup_arr* ti
             trackPtr += ((prevEvent & 0xE0) == 0xC0) ? 0 : 1;
         }
     }
-    puts("does this midi not have an end of track? this message isnt supposed to appear otherwise");
     finalize:
-        if (absolutetime > 1 << 28)
-            printf("\ndear lord what is with your midi file's length. current tick = %ld\n", absolutetime);
         #ifdef _OPENMP
             #pragma omp critical
         #endif
@@ -327,18 +346,32 @@ int64_t CountTrackEvents(uint8_t* trackPtr, uint8_t* trackEnd, TickGroup_arr* ti
         return eventcount_local;
 }
 
-int64_t ParseTrackEvents(uint8_t* trackPtr, uint8_t* trackEnd, uint24_t* msgPtr, uint8_t* trackidxptr, int64_t* writeCursors, TempoEvent_arr* tempo, SysExEvent_arr* sysex, uint8_t track)
+int64_t ParseTrackEvents(uint8_t* trackPtr, uint8_t* trackEnd, uint24_t* msgPtr, TickGroup_arr* trackHistogram, TempoEvent_arr* tempo, SysExEvent_arr* sysex, uint8_t track)
 {
     int64_t absolutetime = 0;
     int64_t notecount = 0;
     uint8_t prevEvent = 0;
-    uint32_t active_idx = 0;
+
+    uint32_t group_idx = 0;
+    int64_t write_pos = 0;
+    uint32_t events_in_group = 0;
+
+    if (trackHistogram->count > 0)
+        write_pos = trackHistogram->data[0].event_offset;
 
     while (trackPtr < trackEnd)
     {
         int64_t delta = *trackPtr++;
         if (delta >= 0x80)
             delta = varlen_decode_slow(&delta, &trackPtr);
+
+        if (delta > 0 && events_in_group > 0)
+        {
+            group_idx++;
+            if (group_idx < trackHistogram->count)
+                write_pos = trackHistogram->data[group_idx].event_offset;
+            events_in_group = 0;
+        }
 
         absolutetime += delta;
         uint8_t readEvent = *trackPtr++;
@@ -347,16 +380,16 @@ int64_t ParseTrackEvents(uint8_t* trackPtr, uint8_t* trackEnd, uint24_t* msgPtr,
             if (readEvent < 0xF0)
             {
                 prevEvent = readEvent;
-                long pos = get_next_pos(absolutetime, &active_idx, writeCursors);
-                if (trackcolors)
-                    trackArr[pos] = track;
+                long pos = write_pos++;
+                events_in_group++;
+
                 if ((readEvent & 0xE0) != 0xC0)
                 {
                     uint8_t data1 = *trackPtr++;
                     uint8_t data2 = *trackPtr++;
                     if ((readEvent & 0xF0) == 0x90)
                     {
-                        if(data2 != 0)
+                        if (data2 != 0)
                             notecount++;
                         else 
                         {
@@ -379,7 +412,7 @@ int64_t ParseTrackEvents(uint8_t* trackPtr, uint8_t* trackEnd, uint24_t* msgPtr,
                     case 0xF0:
                     {
                         int64_t size = *trackPtr++;
-                        if(size >= 0x80)
+                        if (size >= 0x80)
                             size = varlen_decode_slow(&size, &trackPtr);
                         uint8_t* data = malloc(size + 1);
                         data[0] = readEvent;
@@ -387,10 +420,11 @@ int64_t ParseTrackEvents(uint8_t* trackPtr, uint8_t* trackEnd, uint24_t* msgPtr,
                             data[i] = *trackPtr++;
                         
                         uint8_t sysextoignore[] = {0xF0,0x7E,0x7F,0x09,0x01,0xF7};
-                        
-                        if (memcmp(data, sysextoignore, sizeof(sysextoignore)) == 0) 
-                            continue; 
-                        
+                        if (size + 1 >= (int64_t)sizeof(sysextoignore) && memcmp(data, sysextoignore, sizeof(sysextoignore)) == 0)
+                        {
+                            free(data);
+                            continue;
+                        }
                         SysExEvent sex = {absolutetime, size + 1, data};
                         #ifdef _OPENMP
                             #pragma omp critical
@@ -398,28 +432,20 @@ int64_t ParseTrackEvents(uint8_t* trackPtr, uint8_t* trackEnd, uint24_t* msgPtr,
                         SysExEvent_arr_push(sysex, sex);
                         continue;
                     }
-                    case 0xF1:
-                    { 
-                        trackPtr += 1; 
-                        continue;
-                    }
-                    case 0xF2:
-                    { 
+                    case 0xF2: 
                         trackPtr += 2; 
                         continue;
-                    }
+                    case 0xF1:
                     case 0xF3: 
-                    {    
                         trackPtr += 1; 
                         continue;
-                    }
                     case 0xFF:
                     {
                         readEvent = *trackPtr++;
                         if (readEvent == 0x51)
                         {
                             int64_t len = *trackPtr++;
-                            if(len >= 0x80)
+                            if (len >= 0x80)
                                 len = varlen_decode_slow(&len, &trackPtr);
                             
                             int32_t tempoVal = 0;
@@ -449,13 +475,13 @@ int64_t ParseTrackEvents(uint8_t* trackPtr, uint8_t* trackEnd, uint24_t* msgPtr,
         }
         else
         {
-            long pos = get_next_pos(absolutetime, &active_idx, writeCursors);
-            if (trackcolors)
-                trackArr[pos] = track;
+            long pos = write_pos++;
+            events_in_group++;
+
             if ((prevEvent & 0xE0) != 0xC0)
             {
                 uint8_t data2 = *trackPtr++;
-                if(data2 != 0)
+                if (data2 != 0)
                     notecount++;
                 else 
                 {
@@ -485,7 +511,7 @@ void printparsestatistics(void)
     "       Count:              %lfs (%s notes/s)\n"
     "       Parse:              %lfs (%s notes/s)\n"
     "   Properties:\n"
-    "       PPQ / Ticks:        %s / %s (%ld has events)\n"
+    "       PPQ / Ticks:        %s / %s (%s has events)\n"
     "       Tracks:             %s\n"
     "       Channel Events:     %s\n"
     "       Note ON Events:     %s\n"
@@ -494,58 +520,19 @@ void printparsestatistics(void)
     "   Memory Usage:\n"
     "       Timing:             %s Bytes (24 bytes/entry)\n"
     "       Events:             %s Bytes (3 bytes/event)\n"
-    "       Track Index:        %s Bytes (1 byte/event)\n"
+    "       Track Index (RLE):  %s Bytes (%s groups)\n"
+    "       Total:              %s Bytes\n"
     "===============================================\n";
-    // dear god
-    char filesize_str[24];
-    char scan_nps_str[24], parse_nps_str[24];
-    char eventcount_str[24], ppq_str[24];
-    char tempocount_str[24], sysexcount_str[24];
-    char timeline_bytes[24], events_bytes[24], track_bytes[24];
-    AddCommas(fileLen, filesize_str);
-    AddCommas(trackAmount, trackamount_str);
-    AddCommas(maxTick, maxtick_str);
-    AddCommas(eventcount, eventcount_str);
-    AddCommas(ppq, ppq_str);
-    AddCommas((totalnotes / counttime), scan_nps_str);
-    AddCommas((totalnotes / parsetime), parse_nps_str);
-    AddCommas(tempoCount, tempocount_str);
-    AddCommas(sysexCount, sysexcount_str);
-    AddCommas(activetickcount * sizeof(TickGroup), timeline_bytes);
-    AddCommas(eventcount * sizeof(uint24_t), events_bytes);
-    AddCommas(eventcount * sizeof(uint8_t), track_bytes);
-    printf(parsestatistics, filename, filesize_str, counttime, scan_nps_str, 
-        parsetime, parse_nps_str, ppq_str, maxtick_str, activetickcount, trackamount_str,
-        eventcount_str, totalnotes_str, tempocount_str, sysexcount_str,
-        timeline_bytes, events_bytes, track_bytes);
+
+    uint64_t trackRLEBytes = (trackcolors? trackGroups.count : 0) * sizeof(TrackGroup);
+    printf(parsestatistics, filename, 
+        AddCommas(fileLen), counttime, AddCommas((totalnotes / counttime)), parsetime, 
+        AddCommas((totalnotes / parsetime)), AddCommas(ppq), AddCommas(maxTick), AddCommas(activetickcount), AddCommas(trackAmount),
+        AddCommas(eventcount), AddCommas(totalnotes), AddCommas(tempoCount - 1), AddCommas(sysexCount - 1),
+        AddCommas(activetickcount * sizeof(TickGroup)), AddCommas(eventcount * sizeof(uint24_t)),
+        AddCommas(trackRLEBytes), AddCommas(trackGroups.count),
+        AddCommas((activetickcount * sizeof(TickGroup)) + (eventcount * sizeof(uint24_t)) + trackRLEBytes));
 }
-
-static char status_buf[512];
-void updatestatsandprint(const char* fmt, ...)
-{
-    va_list args;
-    char temp[512];
-
-    va_start(args, fmt);
-    vsnprintf(temp, sizeof(temp), fmt, args);
-    va_end(args);
-
-    fputs(temp, stdout);
-    fflush(stdout);
-
-    char *src = temp, *dst = status_buf;
-    while (*src)
-    {
-        if (*src != '\n' && *src != '\r')
-            *dst++ = *src;
-        src++;
-    }
-    *dst = '\0';
-
-    filename = strdup(status_buf);
-}
-
-
 
 TempoEvent_arr tempos = {0};
 SysExEvent_arr sysexs = {0};
@@ -583,8 +570,7 @@ int LoadMIDI(const char* filepath)
         uint8_t* trackstart = filePtr + currtrack->start;
         add(eventcount, CountTrackEvents(trackstart, trackstart + currtrack->length, &histogram[i]));
         add(loadedtracks, 1);
-        AddCommas(totalnotes, totalnotes_str);
-        printf("(%d/%d) tracks scanned, %ld notes counted\r", loadedtracks, trackAmount, totalnotes);
+        printf("(%s/%s) tracks scanned, %s notes counted\r", AddCommas(loadedtracks), AddCommas(trackAmount), AddCommas(totalnotes));
         fflush(stdout);
     }
     double end = get_time();
@@ -596,22 +582,24 @@ int LoadMIDI(const char* filepath)
         total_entries += histogram[i].count;
 
     updatestatsandprint("concatenating per track timing array\n");
-    TickGroup* flat = malloc(total_entries * sizeof(TickGroup));
+    ExtendedTickGroup* flat = malloc(total_entries * sizeof(ExtendedTickGroup));
     int64_t flat_idx = 0;
     for (int32_t i = 0; i < trackAmount; i++)
     {
-        if (histogram[i].count > 0)
+        for (size_t j = 0; j < histogram[i].count; j++)
         {
-            memcpy(flat + flat_idx, histogram[i].data, histogram[i].count * sizeof(TickGroup));
-            flat_idx += histogram[i].count;
+            flat[flat_idx++] = (ExtendedTickGroup){
+                .tick = histogram[i].data[j].tick,
+                .count = (uint32_t)histogram[i].data[j].event_offset,
+                .notecount = (uint32_t)histogram[i].data[j].notecount,
+                .track = (uint16_t)i,
+                .group_idx = (uint32_t)j
+            };
         }
-        TickGroup_arr_free(&histogram[i]);
     }
-    free(histogram);
-    histogram = NULL;
 
     updatestatsandprint("sorting timing array by tick\n");
-    qsort(flat, total_entries, sizeof(TickGroup), cmp_tickgroup);
+    qsort(flat, total_entries, sizeof(ExtendedTickGroup), cmp_extended_tickgroup);
 
     activetickcount = 0;
     if (total_entries > 0)
@@ -624,57 +612,60 @@ int LoadMIDI(const char* filepath)
         }
     }
 
-    updatestatsandprint("creating main timing array\n");
+    updatestatsandprint("creating main timing array and track RLE\n");
     timingArr = calloc(activetickcount + 1, sizeof(TickGroup));
-    int64_t* writeCursors = calloc(activetickcount + 1, sizeof(int64_t));
+    if (trackcolors)
+    {
+        trackGroups.data = malloc(total_entries * sizeof(TrackGroup));
+        trackGroups.count = total_entries;
+    }
+    int64_t current_global_offset = 0;
+    int64_t accumulated_notes = 0;
 
-    int64_t offset = 0;
-    int64_t notecount = 0;
     if (total_entries > 0)
     {
         int64_t out_idx = 0;
         timingArr[0].tick = flat[0].tick;
-        int64_t current_note_cnt = flat[0].notecount;
-        int64_t current_event_cnt = flat[0].event_offset;
+        timingArr[0].event_offset = 0;
+        timingArr[0].notecount = 0;
 
-        for (size_t i = 1; i < total_entries; i++)
+        for (size_t i = 0; i < total_entries; i++)
         {
-            if (flat[i].tick == timingArr[out_idx].tick)
-            {
-                timingArr[out_idx].notecount += flat[i].notecount;
-                current_event_cnt += flat[i].event_offset;
-                current_note_cnt += flat[i].notecount;
-            }
-            else
-            {
-                writeCursors[out_idx] = offset;
-                timingArr[out_idx].event_offset = offset;
-                timingArr[out_idx].notecount = notecount;
-                notecount += current_note_cnt;
-                offset += current_event_cnt;
+            ExtendedTickGroup* eg = &flat[i];
 
+            if (i > 0 && eg->tick != timingArr[out_idx].tick)
+            {
                 out_idx++;
-                timingArr[out_idx].tick = flat[i].tick;
-                current_event_cnt = flat[i].event_offset;
-                current_note_cnt = flat[i].notecount;
+                timingArr[out_idx].tick = eg->tick;
+                timingArr[out_idx].event_offset = current_global_offset;
+                timingArr[out_idx].notecount = accumulated_notes;
             }
+
+            timingArr[out_idx].notecount += eg->notecount;
+            accumulated_notes += eg->notecount;
+
+            histogram[eg->track].data[eg->group_idx].event_offset = current_global_offset;
+            if (trackcolors)
+            {
+                trackGroups.data[i] = (TrackGroup){
+                    .event_offset = current_global_offset,
+                    .count = eg->count,
+                    .track = (uint8_t)(eg->track << 4)
+                };
+            }
+
+            current_global_offset += eg->count;
         }
-        writeCursors[out_idx] = offset;
-        timingArr[out_idx].event_offset = offset;
-        timingArr[out_idx].notecount = notecount;
-        offset += current_event_cnt;
-        notecount += current_note_cnt;
     }
     free(flat);
     flat = NULL;
 
     updatestatsandprint("creating main event array\n");
     eventArr = calloc(eventcount + 1, sizeof(uint24_t));
-    trackArr = calloc(eventcount + 1, sizeof(uint8_t));
 
     loadedtracks = 0;
     updatestatsandprint("actually parsing events this time\n");
-    int64_t loadednotes = 0;
+    playednotes = 0;
     start = get_time();
     
     #ifdef _OPENMP
@@ -684,17 +675,19 @@ int LoadMIDI(const char* filepath)
     {
         trackProperties* currtrack = &tracks.data[i];
         uint8_t* trackstart = filePtr + currtrack->start;
-        add(loadednotes, ParseTrackEvents(trackstart, trackstart + currtrack->length, eventArr, trackArr, writeCursors, &tempos, &sysexs, (i << 4)))
+        add(playednotes, ParseTrackEvents(trackstart, trackstart + currtrack->length, eventArr, &histogram[i], &tempos, &sysexs, (i << 4)));
         add(loadedtracks, 1);
-        AddCommas(loadednotes, playednotes_str);
-        printf("(%d/%d) tracks parsed, %s notes parsed\r", loadedtracks, trackAmount, playednotes_str);
+        printf("(%s/%s) tracks parsed, %s notes parsed\r", AddCommas(loadedtracks), AddCommas(trackAmount), AddCommas(playednotes));
         fflush(stdout);
     }
     end = get_time();    
 
-    AddCommas(0, playednotes_str);
+    for (int32_t i = 0; i < trackAmount; i++)
+        TickGroup_arr_free(&histogram[i]);
+    free(histogram);
+
     updatestatsandprint("\nfinalizing events and sorting metadata\n");
-    timingArr[activetickcount] = (TickGroup){INT32_MAX, (int32_t)totalnotes, (int64_t)eventcount};
+    timingArr[activetickcount] = (TickGroup){INT64_MAX, (int32_t)totalnotes, (int64_t)eventcount};
     TempoEvent tev = {INT64_MAX, 500000};
     TempoEvent_arr_push(&tempos, tev);
     SysExEvent sex = {INT64_MAX};
@@ -707,8 +700,6 @@ int LoadMIDI(const char* filepath)
     sysexArr = sysexs.data;
     tempoCount = tempos.count;
     sysexCount = sysexs.count;
-    free(writeCursors);
-    writeCursors = NULL;
     trackProperties_arr_free(&tracks);
     munmap(filePtr, filestat.st_size);
     filePtr = NULL;
@@ -727,8 +718,6 @@ void UnloadMIDI(void)
     totalnotes = 0;
     eventcount = 0;
     activetickcount = 0;
-    AddCommas(0, totalnotes_str);
-    free((void*)filename); 
     filename = "no midi loaded";
     filename_len = 0;
     
@@ -738,8 +727,13 @@ void UnloadMIDI(void)
     TempoEvent_arr_free(&tempos);
     SysExEvent_arr_free(&sysexs);
     free(eventArr);
-    free(trackArr);
     free(timingArr);
+    if (trackcolors)
+    {
+        free(trackGroups.data);
+        trackGroups.data = NULL;
+        trackGroups.count = 0;
+    }
     sysexArr = NULL;
     tempoArr = NULL;
     eventArr = NULL;

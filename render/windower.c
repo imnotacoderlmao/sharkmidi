@@ -4,7 +4,6 @@
 #include "../playback/playback_thread.h"
 #include "../playback/timer.h"
 #include "../parse/parser.h"
-#include "../third_party/glad/include/glad/glad.h"
 #include "../synth/sound.h"
 #include "../third_party/conmidi_digit_formatter.h"
 #include "text_renderer.h"
@@ -12,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 
 #define MIN(a, b) (((a) < (b)) ? (a) : (b))
 #define MAX(a, b) (((a) > (b)) ? (a) : (b))
@@ -200,6 +200,11 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
             EnableGlow = EnableGlow? 0 : 1;
         if (key == GLFW_KEY_T)
             EnableTransparency = EnableTransparency? 0 : 1;
+        if (key == GLFW_KEY_C)
+        {
+            trackcolors = trackcolors? 0 : 1;
+            printf("track coloring is %s on next load\n", trackcolors? "TRUE" : "FALSE");
+        }
         if (key == GLFW_KEY_D)
         {
             dynascroll = dynascroll? 0 : 1;
@@ -213,49 +218,48 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
         if (key == GLFW_KEY_V)
             targetfps = targetfps? 0 : glfwGetVideoMode(glfwGetPrimaryMonitor())->refreshRate;
         if (key == GLFW_KEY_Q)
-        {
-            clock_pause();
-            reinitsynths();
-            clock_pause();   
-        }
+            reinitsynths();   
+        if (key == GLFW_KEY_R)
+            stopping = 1;
     }
-    if (key == GLFW_KEY_RIGHT)
-        clock_skip(tickscale, 0);
-
-    if (key == GLFW_KEY_LEFT)
-        clock_skip(tickscale * -1, 0);
-
-    if (key == GLFW_KEY_UP)
+    if (action != GLFW_RELEASE)
     {
-        if (dynascroll)
+        if (key == GLFW_KEY_RIGHT)
+            clock_skip(tickscale, 0);
+
+        if (key == GLFW_KEY_LEFT)
+            clock_skip(tickscale * -1, 0);
+
+        if (key == GLFW_KEY_UP)
         {
-            if (scrollfactor <= 0.5)
-                scrollfactor = MAX(scrollfactor / 2, 0.1);
+            if (dynascroll)
+            {
+                if (scrollfactor <= 0.5)
+                    scrollfactor = MAX(scrollfactor / 2, 0.1);
+                else
+                    scrollfactor -= 0.1; 
+            }
+            else if (stationarynotes)
+                scrollfactor = MAX(scrollfactor - 1, 1);
             else
-                scrollfactor -= 0.1; 
+                WindowTicks /= 1.1;
         }
-        else if (stationarynotes)
-            scrollfactor = MAX(scrollfactor - 1, 1);
-        else
-            WindowTicks /= 1.1;
-    }
-    
-    if (key == GLFW_KEY_DOWN)
-    {
-        if (dynascroll)
+
+        if (key == GLFW_KEY_DOWN)
         {
-            if (scrollfactor <= 0.5)
-                scrollfactor *= 2;
+            if (dynascroll)
+            {
+                if (scrollfactor <= 0.5)
+                    scrollfactor *= 2;
+                else
+                    scrollfactor += 0.1; 
+            }
+            else if (stationarynotes)
+                scrollfactor += 1;
             else
-                scrollfactor += 0.1; 
+                WindowTicks = (WindowTicks * 1.1) + 1;   
         }
-        else if (stationarynotes)
-            scrollfactor += 1;
-        else
-            WindowTicks = (WindowTicks * 1.1) + 1;   
     }
-    if (key == GLFW_KEY_R)
-        stopping = 1;
 }
 
 void drop_callback(GLFWwindow* w, int count, const char** paths)
@@ -352,6 +356,7 @@ void Window_Run(const char* filepath)
     }
 
     const int PAD = 20;
+    double smoothed_fps = 0.0;
     glfwSetDropCallback(win, drop_callback);
     targetfps = glfwGetVideoMode(glfwGetPrimaryMonitor())->refreshRate;
     last_time = get_time();
@@ -361,6 +366,8 @@ void Window_Run(const char* filepath)
         delta_time = get_time() - last_time;
         last_time += delta_time;
         fps = (int)(1.0/delta_time);
+        double alpha = 1.0 - exp(-delta_time * 2.0);
+        smoothed_fps += alpha * (fps - smoothed_fps);
         
         int fbWidth, fbHeight;
         glfwGetFramebufferSize(win, &fbWidth, &fbHeight);
@@ -377,14 +384,13 @@ void Window_Run(const char* filepath)
             WindowTicks = (int)(ppq * scrollfactor);
         
         UpdatePlaybackStats();
-        AddCommas(fps, rendererfps_str);
-        AddCommas(NotesDrawnLastFrame, quad_on_screen_str);            
+                 
         Text_Draw(fbWidth, fbHeight, 5, 4, 1.75f, 0.0f, 1.0f, 0.0f,
             "tick: %s | zoom: %d %s | QoS: %s | bpm: %.2f | fps: %s",
-            curr_tick_str, stationarynotes? (int)scrollfactor : WindowTicks, stationarynotes? "bars" : "ticks", quad_on_screen_str, bpm, rendererfps_str);
+            AddCommas(current_clock), stationarynotes? (int)scrollfactor : WindowTicks, stationarynotes? "bars" : "ticks", AddCommas(NotesDrawnLastFrame), bpm, AddCommas(smoothed_fps));
         
         Text_Draw(fbWidth, fbHeight, 5, fbHeight - 16, 1.75f, 0.0f, 0.7f, 1.0f,
-            "%s | notes: %s / %s (%s/s)", scrollfilenameifover32characters(filename), playednotes_str, totalnotes_str, play_nps_str);
+            "%s | notes: %s / %s (%s/s)", scrollfilenameifover32characters(filename), AddCommas(playednotes), AddCommas(totalnotes), AddCommas(notespersec));
 
         glfwSwapBuffers(win);
         glfwPollEvents();
@@ -398,6 +404,7 @@ void Window_Shutdown(void)
     Text_Dispose();
     Renderer_Dispose();
     UnloadMIDI();
+    Sound_Close();
     glfwDestroyWindow(win);
     glfwTerminate();
 }

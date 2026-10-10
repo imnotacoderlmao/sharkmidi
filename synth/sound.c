@@ -2,6 +2,7 @@
 #include "KDMAPI.h"
 #include "../misc/uint24.h"
 #include "../playback/playback_thread.h"
+#include <string.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -37,6 +38,7 @@ void* audiothread(void* args)
             readptr = (readptr + 1) & RINGBUFFER_MASK;
         }
     }
+    memset(ringbuffer, 0, RINGBUFFER_SIZE * sizeof(uint24_t));
     return NULL;
 }
 
@@ -60,7 +62,7 @@ int32_t Sound_Init(int32_t singlethreaded)
     printf("singlethread is %s.\n", singlethreaded? "TRUE" : "FALSE");
     singlethread = singlethreaded;
     if (!singlethreaded) 
-        ringbuffer = (uint24_t*)calloc(RINGBUFFER_SIZE + 1, sizeof(uint24_t));
+        ringbuffer = (uint24_t*)calloc(RINGBUFFER_SIZE, sizeof(uint24_t));
     if(hasvoice)
         voicefetching = 1;
     issynthinitiated = 1;
@@ -69,6 +71,7 @@ int32_t Sound_Init(int32_t singlethreaded)
 
 void Sound_Close(void)
 {
+    if (!issynthinitiated) return;
     KDMAPI_TerminateKDMAPIStream();
     issynthinitiated = 0;
     voicefetching = 0;

@@ -9,6 +9,17 @@ typedef struct
     int64_t event_offset;
 } TickGroup;
 
+typedef struct {
+    int64_t event_offset; // Starting index in eventArr
+    uint32_t count;       // Number of events in this run
+    uint8_t track;        // Track ID
+} TrackGroup;
+
+typedef struct {
+    TrackGroup* data;
+    int64_t count;
+} TrackGroup_arr;
+
 typedef struct 
 {
     int64_t tick;
@@ -25,7 +36,7 @@ typedef struct
 
 extern TickGroup* timingArr;
 extern uint24_t* eventArr;
-extern uint8_t* trackArr;
+extern TrackGroup_arr trackGroups;
 extern SysExEvent* sysexArr;
 extern TempoEvent* tempoArr;
 extern uint64_t totalnotes;

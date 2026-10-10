@@ -1,6 +1,5 @@
 #include "text_renderer.h"
 #include "renderer.h"
-#include "../third_party/glad/include/glad/glad.h"
 #define STB_EASY_FONT_IMPLEMENTATION
 #include "../third_party/stb_easy_font.h"
 #include <stdarg.h>

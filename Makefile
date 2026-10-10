@@ -1,6 +1,7 @@
 CC ?= gcc
 CFLAGS = -O3 -fstrict-overflow -fno-math-errno -fno-stack-protector
-LDFLAGS = -pthread
+# libmath now linked due to exp()
+LDFLAGS = -pthread -lm
 
 # for cross compilation purposes
 IS_MINGW = $(shell $(CC) -dumpmachine 2>&1 | grep -E "mingw|w64")

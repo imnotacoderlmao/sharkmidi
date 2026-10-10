@@ -3,6 +3,7 @@
 #include "timer.h"
 #include "../synth/sound.h"
 #include "../third_party/conmidi_digit_formatter.h"
+#include <math.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
@@ -11,8 +12,6 @@ double now = 0.0, last = 0.0, delta = 0.0, tick = 0.0;
 double laststatsupdate = 0.0, bpm = 120.0, tickscale = 0.0;
 volatile int paused = 0, stopping = 1;
 int skipping = 0;
-int64_t npshistory[60];
-int npshistoryidx = 0;
 int64_t current_clock = 0;
 const double onesixtyh = 0.016666666;
 // oh god do i really have to abuse macros too
@@ -94,34 +93,46 @@ void clock_pause(void)
 
 TickGroup* timing = NULL;
 double midifps = 0;
+double smoothed_nps = 0.0, smoothed_midifps = 0.0;
+
 void UpdatePlaybackStats()
 {   
     double noww = get_time();
-    if ((noww - laststatsupdate) < onesixtyh || stopping)
+    double dt = noww - laststatsupdate;
+    
+    if (dt < onesixtyh || stopping)
         return;
+        
     if (tick >= maxTick) 
         stopping = 1;
-    
+
+    if (tick < ppq && (timing + 1)->tick > (ppq * 10))
+        tick = (timing + 1)->tick - ppq;
+        
     midifps = 1 / delta;
-    
     playednotes = timing->notecount;
-    npshistoryidx = (npshistoryidx + 1) % 60;
-    notespersec -= npshistory[npshistoryidx];
-    npshistory[npshistoryidx] = playednotes - playednotes2;
-    notespersec += npshistory[npshistoryidx];
+
+    int64_t delta_notes = playednotes - playednotes2;
+    double instant_nps = (double)delta_notes / dt;
     playednotes2 = playednotes;
 
-    AddCommas(current_clock, curr_tick_str);
-    AddCommas(playednotes, playednotes_str);
-    AddCommas(notespersec, play_nps_str);
-    AddCommas(midifps, midifps_str);
+    double alpha = 1.0 - exp(-dt * 2.0); // equivalent to dividing by 0.5 for a 0.5s window
+    smoothed_nps += alpha * (instant_nps - smoothed_nps);
+    smoothed_midifps += alpha * (midifps - smoothed_midifps);
+    notespersec = (int64_t)smoothed_nps;
+
     if (voicefetching)
     {
-        AddCommas(GetVoiceCount(), voicecount_str);
-        printf("tick: %s / %s | notes: %s / %s (%s/s) | bpm: %.2lf | midi thread: %10s fps | %s voices    \r", curr_tick_str, maxtick_str, playednotes_str, totalnotes_str, play_nps_str, bpm, midifps_str, voicecount_str);
-    }    
+        printf("tick: %s / %s | notes: %s / %s (%s/s) | bpm: %.2lf | midi thread: %10s fps | %s voices    \r", 
+            AddCommas(current_clock), AddCommas(maxTick), AddCommas(playednotes), AddCommas(totalnotes), 
+            AddCommas(notespersec), bpm, AddCommas(smoothed_midifps), AddCommas(GetVoiceCount()));  
+    }
     else
-        printf("tick: %s / %s | notes: %s / %s (%s/s) | bpm: %.2lf | midi thread: %10s fps    \r", curr_tick_str, maxtick_str, playednotes_str, totalnotes_str, play_nps_str, bpm, midifps_str);
+    {
+        printf("tick: %s / %s | notes: %s / %s (%s/s) | bpm: %.2lf | midi thread: %10s fps    \r", 
+            AddCommas(current_clock), AddCommas(maxTick), AddCommas(playednotes), AddCommas(totalnotes), 
+            AddCommas(notespersec), bpm, AddCommas(smoothed_midifps));
+    }
     laststatsupdate = noww;
 }
 
@@ -170,7 +181,8 @@ void StartPlayback(int singlethread)
         puts("no midi loaded!!!!!!!");
         return;
     }
-    stopping = 0;
+    if (!issynthinitiated) { puts("no synth initiated!!!!!!!"); return; }
+    stopping = 0, playednotes = 0, playednotes2 = 0;
     if (!singlethread)
         audiothread_entry();
     uint24_t* eventptr = eventArr;
@@ -189,6 +201,8 @@ void StartPlayback(int singlethread)
             played = timing->event_offset;
             while (sysex > sysexArr && sysex->tick > clock)
                 sysex--;
+            if (!singlethread)
+                memset(ringbuffer, 0, RINGBUFFER_SIZE * sizeof(uint24_t));
         }
         while (timing->tick <= clock)
         {
@@ -230,9 +244,6 @@ void StartPlayback(int singlethread)
     AllNotesOFF();
     uint8_t rolandreset[] = {0xF0, 0x41, 0x10, 0x42, 0x12, 0x40, 0x00, 0x7F, 0x00, 0x41, 0xF7};
     SubmitSysEx((SysExEvent){0, 11, rolandreset});    
-    playednotes = 0, playednotes2 = 0, notespersec = 0;
-    memset(npshistory, 0, 60 * sizeof(int64_t));
-    AddCommas(0, playednotes_str);
-    AddCommas(0, play_nps_str);
+    notespersec = 0, smoothed_nps = 0;
     puts("\nPlayback finished...");
 }
