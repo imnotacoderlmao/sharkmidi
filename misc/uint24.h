@@ -1,5 +1,5 @@
-#ifndef uint24
-#define uint24
+#ifndef UINT24_H
+#define UINT24_H
 #include <stdint.h>
 
 typedef struct __attribute__((packed)) 

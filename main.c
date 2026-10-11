@@ -1,13 +1,11 @@
-#include "parse/parser.h"
-#include "playback/playback_thread.h"
 #include "render/windower.h"
 #include "synth/sound.h"
 #include <stdio.h>
 #include <string.h>
-int main(int32_t argc, char* argv[])
+int main(int argc, char* argv[])
 {
     char welcome[] = 
-    "========== sharkmidi commit #21 ==========\n"
+    "========== sharkmidi commit #22 ==========\n"
     "optionally, you could add a file path after the executable for the it to load a midi immediately, like:\n"
     "   ./sharkmidi (single threaded playback) (midi file directory)\n"
     "controls are:\n"   
@@ -19,16 +17,20 @@ int main(int32_t argc, char* argv[])
     "   s = music sheet style\n"
     "   d = dynamic scroll speed\n"
     "   t = note transparency linear to velocity\n"
+    "   g = toggle note glow\n"
+    "   c = track colors (applies on next load)\n"
+    "   v = toggle fps cap\n"
     "   q = reinitialize synth\n"
+    "   esc = quit\n"
     "===========================================";
     
     puts(welcome);
     
     setbuf(stdout, NULL); // just for printf to print everytime its called
     singlethread = (argv[1] != NULL && strcmp(argv[1], "false") == 0)? 0 : 1;
-    Window_Init();
-    // windows only builds crashes due to trying to access a pointer that dosent exist in my testing, otherwise id omit the argc check
-    Window_Run((argc >= 3)? argv[2] : NULL);
+    if (!Window_Init())
+        return 1;
+    Window_Run((argc >= 3)? argv[2] : NULL); // argv[2] only exists when argc >= 3
     Window_Shutdown();
     return 0;
 }

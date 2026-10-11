@@ -1,26 +1,20 @@
-#include "../misc/uint24.h"
 #ifndef SYNTH
 #define SYNTH
+#include "KDMAPI.h"
+#include "../misc/uint24.h"
+#include <stdatomic.h>
+#include <stdint.h>
 
-#if defined(_WIN32) || defined(_WIN64)
-    #include <windows.h>
-    extern int32_t (*PrepareLongData)(MIDIHDR* hdr, int32_t hdrsize);
-    extern int32_t (*UnprepareLongData)(MIDIHDR* hdr, int32_t hdrsize);
-    extern int32_t (*SendDirectLongData)(MIDIHDR* hdr, int32_t hdrsize);
-#else
-    extern int32_t (*SendDirectLongData)(uint8_t* message, int32_t messagesize);
-#endif
-extern int32_t Sound_Init(int32_t singlethreaded);
-extern void AllNotesOFF(void);
-extern void (*SendDirectData)(uint32_t message);
-extern void audiothread_entry(void);
-extern void reinitsynths(void);
-extern void Sound_Close();
-extern int issynthinitiated, singlethread;
-extern int32_t (*GetVoiceCount)(void);
+#define RINGBUFFER_SIZE 2097152u
+#define RINGBUFFER_MASK (RINGBUFFER_SIZE - 1u)
+
+int Sound_Init(int singlethreaded);
+void Sound_Close(void);
+void AllNotesOFF(void);
+void reinitsynths(void);
+void audiothread_entry(void);
+void audiothread_join(void);
+extern int issynthinitiated, singlethread, voicefetching;
 extern uint24_t* ringbuffer;
-extern int32_t voicefetching;
-extern volatile uint32_t writeptr;
-extern const uint32_t RINGBUFFER_SIZE;
-extern const uint32_t RINGBUFFER_MASK;
+extern _Atomic uint32_t writeptr;
 #endif

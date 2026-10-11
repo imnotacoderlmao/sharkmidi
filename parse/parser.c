@@ -15,9 +15,9 @@
 
 #ifdef _OPENMP
     #include <omp.h>
-    #define add(a, b) __atomic_fetch_add(&a, b, __ATOMIC_RELAXED);
+    #define ATOMIC_ADD(a, b) __atomic_fetch_add(&(a), (b), __ATOMIC_RELAXED)
 #else
-    #define add(a, b) a += b;     
+    #define ATOMIC_ADD(a, b) ((a) += (b))
 #endif
 
 typedef struct
@@ -31,19 +31,18 @@ typedef struct
     int64_t tick;
     uint32_t count;
     uint32_t notecount;
-    uint16_t track;
     uint32_t group_idx;
+    uint16_t track;
 } ExtendedTickGroup;
 
-uint8_t* filePtr = NULL;
 uint64_t fileLen = 0;
 uint64_t filePos = 0;
-struct stat filestat;
-uint32_t headersize = 0; 
-uint16_t trackAmount = 0;
-uint32_t fmt = 0;
-int32_t midiloaded = 0, trackcolors = 1;
 uint64_t eventcount = 0;
+uint32_t headersize = 0; 
+uint32_t fmt = 0;
+uint16_t trackAmount = 0;
+uint8_t* filePtr = NULL;
+int midiloaded = 0, trackcolors = 1;
 
 DEFINE_ARRAY(trackProperties);
 DEFINE_ARRAY(TickGroup);
@@ -108,38 +107,56 @@ int InitMMF(const char* filepath)
     HANDLE filehandle = CreateFileA(filepath, GENERIC_READ, FILE_SHARE_READ,
         NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     LARGE_INTEGER fileSize;
-    GetFileSizeEx(filehandle, &fileSize);
-    if (filehandle == INVALID_HANDLE_VALUE)
+    if (filehandle == INVALID_HANDLE_VALUE || !GetFileSizeEx(filehandle, &fileSize) || fileSize.QuadPart == 0)
     {
         updatestatsandprint("error getting file properties, does the file even exist?");
-        CloseHandle(filehandle);
+        if (filehandle != INVALID_HANDLE_VALUE)
+            CloseHandle(filehandle);
         return 0;
     }
     HANDLE mapfilehandle = CreateFileMapping(filehandle, NULL, PAGE_READONLY, 0, 0, NULL);
     CloseHandle(filehandle);
+    if (!mapfilehandle)
+    {
+        updatestatsandprint("error creating file mapping");
+        return 0;
+    }
     fileLen = fileSize.QuadPart;
     filePos = 0;
     filePtr = MapViewOfFile(mapfilehandle, FILE_MAP_READ, 0, 0, 0);
     CloseHandle(mapfilehandle);
-    printf("successfully initiated memory mapped file with %lu bytes in size\n", fileLen);
+    if (!filePtr)
+    {
+        updatestatsandprint("error mapping file view");
+        return 0;
+    }
+    printf("successfully initiated memory mapped file with %llu bytes in size\n", (unsigned long long)fileLen);
     return 1;
 }
 #else
 #include <sys/mman.h>
 int InitMMF(const char* filepath)
 {
+    struct stat filestat;
     int filedesc = open(filepath, O_RDONLY);
-    if (fstat(filedesc, &filestat) == -1)
+    if (filedesc == -1 || fstat(filedesc, &filestat) == -1 || filestat.st_size == 0)
     {
         updatestatsandprint("error getting filesize, does the file even exist?\n");
-        close(filedesc);
+        if (filedesc != -1)
+            close(filedesc);
         return 0;
     }
     fileLen = filestat.st_size;
     filePos = 0;
     filePtr = mmap(NULL, filestat.st_size, PROT_READ, MAP_PRIVATE, filedesc, 0);
     close(filedesc);
-    printf("successfully initiated memory mapped file with %lu bytes in size\n", fileLen);
+    if (filePtr == MAP_FAILED)
+    {
+        filePtr = NULL;
+        updatestatsandprint("mmap failed\n");
+        return 0;
+    }
+    printf("successfully initiated memory mapped file with %llu bytes in size\n", (unsigned long long)fileLen);
     return 1;
 }
 #endif
@@ -177,7 +194,7 @@ static uint16_t ReadUInt16(void)
 
 static int SearchText(char* text)
 {
-    for (int32_t i = 0; i < strlen(text); i++)
+    for (int i = 0; i < strlen(text); i++)
     {
         if (filePos >= fileLen) 
             return 0;
@@ -213,7 +230,11 @@ int IndexTrack(trackProperties_arr* tracklistptr)
 {
     if (SearchText("MTrk"))
     {
+        if (filePos + 4 > fileLen)
+            return 0;
         uint32_t size = ReadUInt32();
+        if (filePos + size > fileLen) // truncated file, clamp so the parser can't run off the mapping
+            size = (uint32_t)(fileLen - filePos);
         trackProperties track = {filePos, size};
         trackProperties_arr_push(tracklistptr, track);
         filePos += size;
@@ -250,7 +271,6 @@ int64_t CountTrackEvents(uint8_t* trackPtr, uint8_t* trackEnd, TickGroup_arr* ti
     int64_t eventcount_local = 0;
     int64_t absolutetime = 0;
     uint8_t prevEvent = 0;
-    int32_t trackMaxTick = 0;
     uint64_t count = 0;
     uint32_t notecount = 0;
     
@@ -313,10 +333,7 @@ int64_t CountTrackEvents(uint8_t* trackPtr, uint8_t* trackEnd, TickGroup_arr* ti
                             trackPtr += len2;
                         }
                         else
-                        {
-                            trackMaxTick = absolutetime;
                             goto finalize;
-                        }
                         continue;
                 }        
            }
@@ -333,8 +350,8 @@ int64_t CountTrackEvents(uint8_t* trackPtr, uint8_t* trackEnd, TickGroup_arr* ti
         #ifdef _OPENMP
             #pragma omp critical
         #endif
-        if (trackMaxTick > maxTick)
-            maxTick = trackMaxTick;
+        if (absolutetime > maxTick)
+            maxTick = absolutetime;
         if (count > 0)
         {
             TickGroup group = {absolutetime, notecount, count};
@@ -342,7 +359,7 @@ int64_t CountTrackEvents(uint8_t* trackPtr, uint8_t* trackEnd, TickGroup_arr* ti
             eventcount_local += count;
             totalnotes_local += notecount;
         }
-        add(totalnotes, totalnotes_local);
+        ATOMIC_ADD(totalnotes, totalnotes_local);
         return eventcount_local;
 }
 
@@ -504,7 +521,7 @@ double parsetime = 0.0;
 void printparsestatistics(void)
 {
     char parsestatistics[] =
-    "=============== PARSE STATICTICS ===============\n"
+    "=============== PARSE STATISTICS ===============\n"
     "   MIDI Name:              %s\n"
     "   Filesize:               %s Bytes\n"
     "   Took:\n"
@@ -540,13 +557,13 @@ SysExEvent_arr sysexs = {0};
 int LoadMIDI(const char* filepath)
 {
     UnloadMIDI();
+    trackAmount = 0, totalnotes = 0, eventcount = 0, playednotes = 0, maxTick = 0;
     updatestatsandprint("initiating memory mapped file\n");
     
     if (!InitMMF(filepath)) 
         return midiloaded;
         
     VerifyHeader();
-    maxTick = 0;
     trackProperties_arr tracks = {0};
     
     while(filePos < fileLen)
@@ -568,8 +585,8 @@ int LoadMIDI(const char* filepath)
     {
         trackProperties* currtrack = &tracks.data[i];
         uint8_t* trackstart = filePtr + currtrack->start;
-        add(eventcount, CountTrackEvents(trackstart, trackstart + currtrack->length, &histogram[i]));
-        add(loadedtracks, 1);
+        ATOMIC_ADD(eventcount, CountTrackEvents(trackstart, trackstart + currtrack->length, &histogram[i]));
+        ATOMIC_ADD(loadedtracks, 1);
         printf("(%s/%s) tracks scanned, %s notes counted\r", AddCommas(loadedtracks), AddCommas(trackAmount), AddCommas(totalnotes));
         fflush(stdout);
     }
@@ -665,7 +682,6 @@ int LoadMIDI(const char* filepath)
 
     loadedtracks = 0;
     updatestatsandprint("actually parsing events this time\n");
-    playednotes = 0;
     start = get_time();
     
     #ifdef _OPENMP
@@ -675,8 +691,8 @@ int LoadMIDI(const char* filepath)
     {
         trackProperties* currtrack = &tracks.data[i];
         uint8_t* trackstart = filePtr + currtrack->start;
-        add(playednotes, ParseTrackEvents(trackstart, trackstart + currtrack->length, eventArr, &histogram[i], &tempos, &sysexs, (i << 4)));
-        add(loadedtracks, 1);
+        ATOMIC_ADD(playednotes, ParseTrackEvents(trackstart, trackstart + currtrack->length, eventArr, &histogram[i], &tempos, &sysexs, (i << 4)));
+        ATOMIC_ADD(loadedtracks, 1);
         printf("(%s/%s) tracks parsed, %s notes parsed\r", AddCommas(loadedtracks), AddCommas(trackAmount), AddCommas(playednotes));
         fflush(stdout);
     }
@@ -701,7 +717,7 @@ int LoadMIDI(const char* filepath)
     tempoCount = tempos.count;
     sysexCount = sysexs.count;
     trackProperties_arr_free(&tracks);
-    munmap(filePtr, filestat.st_size);
+    munmap(filePtr, fileLen);
     filePtr = NULL;
     midiloaded = 1;
     filename = getfilename(filepath);
@@ -712,8 +728,8 @@ int LoadMIDI(const char* filepath)
 void UnloadMIDI(void)
 {
     if (!midiloaded) return;
-    stopping = 1;
     midiloaded = 0;
+    Playback_StopAndWait(); // the playback thread reads eventArr/timingArr, don't free them under it
     trackAmount = 0;
     totalnotes = 0;
     eventcount = 0;
@@ -728,12 +744,10 @@ void UnloadMIDI(void)
     SysExEvent_arr_free(&sysexs);
     free(eventArr);
     free(timingArr);
-    if (trackcolors)
-    {
-        free(trackGroups.data);
-        trackGroups.data = NULL;
-        trackGroups.count = 0;
-    }
+    // trackcolors can be toggled between load and unload, so key off the pointer
+    free(trackGroups.data);
+    trackGroups.data = NULL;
+    trackGroups.count = 0;
     sysexArr = NULL;
     tempoArr = NULL;
     eventArr = NULL;

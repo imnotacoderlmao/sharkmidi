@@ -87,6 +87,12 @@ void Text_Draw(int screenWidth, int screenHeight, float x, float y, float scale,
     vsnprintf(str, sizeof(str), fmt, args);
     va_end(args);
 
+    // stb_easy_font indexes a 96-entry table with (c - 32), so anything outside printable ASCII
+    // (e.g. UTF-8 in a file name) reads out of bounds
+    for (char* c = str; *c; c++)
+        if (*c != '\n' && ((unsigned char)*c < 32 || (unsigned char)*c > 126))
+            *c = '?';
+
     unsigned char color[4] = { (unsigned char)(r*255), (unsigned char)(g*255), (unsigned char)(b*255), 255 };
     int numQuads = stb_easy_font_print(0, 0, str, color, vertexBuf, sizeof(vertexBuf));
     if (numQuads <= 0) return;

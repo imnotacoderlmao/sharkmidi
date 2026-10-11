@@ -1,2 +1,5 @@
+#ifndef CONMIDI_DIGIT_FORMATTER_H
+#define CONMIDI_DIGIT_FORMATTER_H
 #include <stdint.h>
-const char* __attribute__((noinline)) AddCommas(int64_t num);
+const char* AddCommas(int64_t num);
+#endif

@@ -1,92 +1,89 @@
 // also thank conmidi for existing
-#include "KDMAPI.h"
-#include "../misc/uint24.h"
+#include "sound.h"
 #include "../playback/playback_thread.h"
 #include <string.h>
 #include <stdio.h>
-#include <stdint.h>
 #include <stdlib.h>
 #include <pthread.h>
-void (*SendDirectData)(uint32_t message);
-#if defined(_WIN32) || defined(_WIN64)
-    int32_t (*SendDirectLongData)(MIDIHDR* hdr, int32_t hdrsize);    
-    int32_t (*PrepareLongData)(MIDIHDR* hdr, int32_t hdrsize);
-    int32_t (*UnprepareLongData)(MIDIHDR* hdr, int32_t hdrsize);
-#else
-    int32_t (*SendDirectLongData)(uint8_t* message, int32_t messagesize);
-#endif
-int32_t (*GetVoiceCount)(void);
-uint24_t* ringbuffer = NULL;
-int32_t voicefetching = 0;
-int issynthinitiated = 0, singlethread = 0;
-volatile uint32_t writeptr = 0;
-volatile uint32_t readptr = 0;
-const uint32_t RINGBUFFER_SIZE = 2097152;
-const uint32_t RINGBUFFER_MASK = RINGBUFFER_SIZE - 1;
-pthread_t audio_thread;
 
-void* audiothread(void* args)
+uint24_t* ringbuffer = NULL;
+int issynthinitiated = 0, singlethread = 0, voicefetching = 0;
+_Atomic uint32_t writeptr = 0;
+static pthread_t audio_thread;
+
+static void* audiothread(void* args)
 {
-    readptr = 0;
     puts("audio thread intialized");
-    while(!stopping)
+    uint32_t readptr = 0;
+    while (!stopping)
     {
-        while (readptr != writeptr)
+        // acquire pairs with the release store in StartPlayback, so the events are visible before the index is
+        uint32_t wp = atomic_load_explicit(&writeptr, memory_order_acquire);
+        while (readptr != wp && !stopping)
         {
             int32_t val = uint24_get(ringbuffer + readptr);
-            SendDirectData((uint32_t)val);
+            if (val)
+                KDMAPI_SendDirectData((uint32_t)val);
             readptr = (readptr + 1) & RINGBUFFER_MASK;
         }
     }
-    memset(ringbuffer, 0, RINGBUFFER_SIZE * sizeof(uint24_t));
     return NULL;
 }
 
 void audiothread_entry(void)
 {
+    atomic_store(&writeptr, 0);
     pthread_create(&audio_thread, NULL, audiothread, NULL);
 }
 
-int32_t Sound_Init(int32_t singlethreaded) 
+// must run before AllNotesOFF, otherwise the audio thread can still push events after it
+void audiothread_join(void)
 {
-    if(!KDMAPI_Setup()){ printf("\nThis program requires OmniMIDI or a KDMAPI capable synth to have functioning audio!\n"); return 0; };
+    pthread_join(audio_thread, NULL);
+    memset(ringbuffer, 0, RINGBUFFER_SIZE * sizeof(uint24_t));
+}
 
+int Sound_Init(int singlethreaded)
+{
+    if (!KDMAPI_Setup())
+    {
+        printf("\nThis program requires OmniMIDI or a KDMAPI capable synth to have functioning audio!\n");
+        return 0;
+    }
     KDMAPI_InitializeKDMAPIStream();
-    SendDirectData = KDMAPI_SendDirectData;
-    SendDirectLongData = KDMAPI_SendDirectLongData;
-    GetVoiceCount = KDMAPI_GetVoiceCount;
-    #if defined(_WIN32) || defined(_WIN64)
-        PrepareLongData = KDMAPI_PrepareLongData;
-        UnprepareLongData = KDMAPI_UnprepareLongData;
-    #endif
-    printf("singlethread is %s.\n", singlethreaded? "TRUE" : "FALSE");
+    printf("singlethread is %s.\n", singlethreaded ? "TRUE" : "FALSE");
     singlethread = singlethreaded;
-    if (!singlethreaded) 
+    if (!singlethreaded && !ringbuffer)
         ringbuffer = (uint24_t*)calloc(RINGBUFFER_SIZE, sizeof(uint24_t));
-    if(hasvoice)
-        voicefetching = 1;
+    voicefetching = hasvoice;
     issynthinitiated = 1;
     return 1;
 }
 
-void Sound_Close(void)
+static void terminate_stream(void)
 {
     if (!issynthinitiated) return;
     KDMAPI_TerminateKDMAPIStream();
     issynthinitiated = 0;
     voicefetching = 0;
-    if (ringbuffer != NULL)
-        free(ringbuffer);
+}
+
+void Sound_Close(void)
+{
+    terminate_stream();
+    free(ringbuffer);
+    ringbuffer = NULL;
 }
 
 void AllNotesOFF(void)
 {
     for (int channel = 0; channel < 16; channel++)
-        SendDirectData((uint32_t)(0xB0 | channel) | (0x7B << 8));
+        KDMAPI_SendDirectData((uint32_t)(0xB0 | channel) | (0x7B << 8));
 }
 
+// keeps the ring buffer alive. the audio thread may still be reading it while the synth restarts
 void reinitsynths(void)
 {
-    Sound_Close();
+    terminate_stream();
     Sound_Init(singlethread);
 }

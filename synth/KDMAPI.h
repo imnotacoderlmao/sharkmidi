@@ -1,6 +1,6 @@
-#include <stdint.h>
 #ifndef KDMAPI_H
 #define KDMAPI_H
+#include <stdint.h>
 #if defined(_WIN32) || defined(_WIN64)
     #include <windows.h>
     #if !defined(_MMEAPI_H_) && !defined(MIDIHDR)
@@ -41,7 +41,7 @@ extern KDM_INIT KDMAPI_TerminateKDMAPIStream;
 extern KDM_DEBUG KDMAPI_GetVoiceCount;
 extern KDM_SEND KDMAPI_SendDirectData;
 extern KDM_LSEND KDMAPI_SendDirectLongData;
-extern int32_t hasvoice;
+extern int hasvoice;
 
-int32_t KDMAPI_Setup();
+int KDMAPI_Setup(void);
 #endif

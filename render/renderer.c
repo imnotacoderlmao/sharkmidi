@@ -1,10 +1,11 @@
 #include "renderer.h"
+#include "shaders.h"
 #include "../parse/midistorage.h"
 #include "../parse/parser.h"
-#include "../playback/playback_thread.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include "../misc/util.h"
 
 #if defined(__SSSE3__)
 #include <tmmintrin.h>
@@ -13,81 +14,15 @@
 #define HAVE_SSSE3 0
 #endif
 
-typedef struct __attribute__((packed))
+typedef struct
 {
     int32_t StartTick;
     int32_t EndTick;
     uint32_t PackedData; // colorIdx:8 << 16 | key:8 << 8 | velocity:8
 } RenderNote;
 
-typedef struct
-{
-    int32_t ActiveAbsId;
-    int32_t ActiveCount;
-} KeyHeader;
-
 #define TOTAL_KEYS (128 * 16 * 16) // key:128 * channel:16 * colorIdx:16
-
-static const char* LineVertSrc =
-"#version 420 core\n"
-"in int aStartTick;\n"
-"in int aEndTick;\n"
-"in uint aPackedData;\n"
-"uniform vec3 uMetrics;\n"
-"uniform int uViewStart;\n"
-"uniform int uViewEnd;\n"
-"uniform int uCurrentTick;\n"
-"uniform sampler1D uPalette;\n"
-"flat out vec4 vColor;\n"
-"flat out int vIsActive;\n"
-"flat out float opacity;\n"
-"void main() {\n"
-"    int endTick = aEndTick > 0 ? aEndTick : uViewEnd;\n"
-"    bool isEnd = (uint(gl_VertexID) & 1u) != 0u;\n"
-"    bool isTop = ((uint(gl_VertexID) >> 1) & 1u) != 0u;\n"
-"    float x = float((bool(isEnd)? endTick : aStartTick) - uViewStart) * uMetrics.x - 1.0;\n"
-"    float y = uMetrics.y + float(((aPackedData >> 8) & 0xFFu) + uint(isTop)) * uMetrics.z;\n"
-"    vColor = texelFetch(uPalette, int(aPackedData >> 16), 0);\n"
-"    vIsActive = (uCurrentTick >= aStartTick && uCurrentTick <= endTick) ? 1 : 0;\n"
-"    opacity = float(((aPackedData & 0xFFu) + 1u)) / 128.0;\n"
-"    gl_Position = vec4(x, y, 0, 1.0);\n"
-"}\n";
-
-static const char* LineFragSrc =
-"#version 420 core\n"
-"flat in vec4 vColor;\n"
-"flat in int vIsActive;\n"
-"flat in float opacity;\n"
-"uniform int uGlowEnabled;\n"
-"uniform int uTransparencyEnabled;\n"
-"out vec4 fragColor;\n"
-"void main() {\n"
-"    float note_opacity = (uTransparencyEnabled == 1) ? opacity : 1.0;\n"
-"    vec3 color = vColor.rgb;\n"
-"    color = (uGlowEnabled == 1 && vIsActive == 1) ? min(color * 2.0 + 0.1, vec3(1.0)) : color;\n"
-"    fragColor = vec4(color, note_opacity);\n"
-"}\n";
-
-static const char* CursorVertSrc =
-"#version 420 core\n"
-"uniform float uCursorX;\n"
-"uniform float uHalfWidthNDC;\n"
-"uniform float uYBottom;\n"
-"uniform float uYTop;\n"
-"void main()\n"
-"{\n"
-"    bool isRight = (uint(gl_VertexID) & 1u) != 0u;\n"
-"    bool isTop = ((uint(gl_VertexID) >> 1) & 1u) != 0u;\n"
-"    float x = uCursorX + (isRight ? uHalfWidthNDC : -uHalfWidthNDC);\n"
-"    float y = isTop ? uYTop : uYBottom;\n"
-"    gl_Position = vec4(x, y, 0.0, 1.0);\n"
-"}\n";
-
-static const char* CursorFragSrc =
-"#version 420 core\n"
-"uniform vec3 uLineColor;\n"
-"out vec4 fragColor;\n"
-"void main() { fragColor = vec4(uLineColor, 1.0); }\n";
+#define MAX_WINDOW_TICKS (1 << 27) // keeps viewStart + WindowTicks inside int range
 
 static GLuint lineShader, cursorShader;
 static GLint uc_cursorX, uc_halfWidth, uc_yBottom, uc_yTop, uc_lineColor;
@@ -95,14 +30,15 @@ static GLint u_metrics, u_viewStart, u_viewEnd, u_palette, u_glowEnabled, u_tran
 static GLuint vao, cursorVAO, vboBuffer, paletteTex;
 
 static RenderNote* ring;
-static int ringCap = 1 << 23;
+static int ringCapacity = 1 << 23;
 static int deferredRingCap = -1;
 static int mask;
 static int headIdx = 1, tailIdx = 1;
 
 static int paletteUploadPending = 0;
 
-static KeyHeader* keyHeaders;
+static int32_t* khdr_absid;
+static uint16_t* khdr_activecount;
 
 static int lookaheadTicks = 500;
 static float pixelsPerTick;
@@ -159,7 +95,6 @@ GLuint build_shader(const char* vert, const char* frag)
 
 static const GLbitfield storageFlags = GL_MAP_WRITE_BIT | GL_MAP_READ_BIT |
     GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT;
-static const GLbitfield accessFlags = storageFlags;
 
 static void bind_vertex_attribs(void)
 {
@@ -182,28 +117,6 @@ static void bind_vertex_attribs(void)
     glBindBuffer(GL_ARRAY_BUFFER, 0);
 }
 
-static void alloc_ring(int cap)
-{
-    mask = cap - 1;
-
-    if (vboBuffer != 0)
-    {
-        glBindBuffer(GL_ARRAY_BUFFER, vboBuffer);
-        glUnmapBuffer(GL_ARRAY_BUFFER);
-        glDeleteBuffers(1, &vboBuffer);
-    }
-
-    glGenBuffers(1, &vboBuffer);
-    glBindBuffer(GL_ARRAY_BUFFER, vboBuffer);
-
-    size_t totalBytes = (size_t)cap * sizeof(RenderNote);
-    glBufferStorage(GL_ARRAY_BUFFER, totalBytes, NULL, storageFlags);
-    ring = (RenderNote*)glMapBufferRange(GL_ARRAY_BUFFER, 0, totalBytes, accessFlags);
-
-    bind_vertex_attribs();
-    ringCap = cap;
-}
-
 static void resize_ring(int newCap)
 {
     if (newCap < 0) return;
@@ -214,7 +127,7 @@ static void resize_ring(int newCap)
     glGenBuffers(1, &newBuffer);
     glBindBuffer(GL_ARRAY_BUFFER, newBuffer);
     glBufferStorage(GL_ARRAY_BUFFER, totalBytes, NULL, storageFlags);
-    RenderNote* newRing = (RenderNote*)glMapBufferRange(GL_ARRAY_BUFFER, 0, totalBytes, accessFlags);
+    RenderNote* newRing = (RenderNote*)glMapBufferRange(GL_ARRAY_BUFFER, 0, totalBytes, storageFlags);
 
     if (headIdx > tailIdx)
     {
@@ -225,7 +138,7 @@ static void resize_ring(int newCap)
             int oldIdx = absId & mask;
             int newIdx = absId & newMask;
             int chunk = remaining;
-            if (ringCap - oldIdx < chunk) chunk = ringCap - oldIdx;
+            if (ringCapacity - oldIdx < chunk) chunk = ringCapacity - oldIdx;
             if (newCap - newIdx < chunk) chunk = newCap - newIdx;
             memcpy(newRing + newIdx, ring + oldIdx, (size_t)chunk * sizeof(RenderNote));
             absId += chunk;
@@ -243,7 +156,7 @@ static void resize_ring(int newCap)
     vboBuffer = newBuffer;
     ring = newRing;
     mask = newMask;
-    ringCap = newCap;
+    ringCapacity = newCap;
 
     bind_vertex_attribs();
 }
@@ -273,19 +186,21 @@ void Renderer_Init(void)
     glUniform1i(u_palette, 0);
     glUseProgram(0);
 
-    keyHeaders = calloc(TOTAL_KEYS, sizeof(KeyHeader));
+    khdr_absid = calloc(TOTAL_KEYS, sizeof(int32_t));
+    khdr_activecount = calloc(TOTAL_KEYS, sizeof(uint16_t));
 
     glGenVertexArrays(1, &vao);
     glGenTextures(1, &paletteTex);
 
-    alloc_ring(ringCap);
+    resize_ring(ringCapacity); // head == tail here, so nothing gets copied
     isInitialized = 1;
 }
 
 void Renderer_InitForMIDI(void)
 {
     isInitialized = 0;
-    memset(keyHeaders, 0, TOTAL_KEYS * sizeof(KeyHeader));
+    memset(khdr_activecount,0, TOTAL_KEYS * sizeof(uint16_t));
+    memset(khdr_absid,0, TOTAL_KEYS * sizeof(int32_t));
     headIdx = 1;
     tailIdx = 1;
     lastSweepEnd = -1;
@@ -302,15 +217,17 @@ void Renderer_ResetForUnload(void)
     tailIdx = 1;
     lastSweepEnd = -1;
     lastWindowTicks = -1;
-    if (ringCap != (1 << 23))
+    if (ringCapacity != (1 << 23))
         deferredRingCap = 1 << 23;
 }
 
 void Renderer_Dispose(void)
 {
     isInitialized = 0;
-    free(keyHeaders);
-    keyHeaders = NULL;
+    free(khdr_absid);
+    khdr_absid = NULL;
+    free(khdr_activecount);
+    khdr_activecount = NULL;
     if (vboBuffer != 0)
     {
         glBindBuffer(GL_ARRAY_BUFFER, vboBuffer);
@@ -327,17 +244,17 @@ void Renderer_Dispose(void)
 }
 
 static inline void process_one_event(uint8_t* messages, int64_t offset, uint8_t status, uint8_t key, uint8_t track,
-    KeyHeader* keyheader, RenderNote* ringLocal, int maskLocal, int64_t tick, int* headLocal)
+    int32_t* khdr_absid, uint16_t* khdr_activecount, RenderNote* ringLocal, int maskLocal, int64_t tick, int* headLocal)
 {
     uint32_t headerIdx = (track | (status & 0x0Fu)) << 7 | key;
-    KeyHeader* header = &keyheader[headerIdx];
+    uint16_t count = khdr_activecount[headerIdx];
     uint32_t statusHigh = status & 0xF0u;
 
     if (statusHigh == 0x90)
     {
-        if (header->ActiveCount == 0)
+        if (count == 0)
         {
-            header->ActiveAbsId = *headLocal;
+            khdr_absid[headerIdx] = *headLocal;
             uint32_t color = headerIdx >> 7;
             uint8_t velocity = messages[offset * 3 + 2];
             ringLocal[*headLocal & maskLocal] = (RenderNote){
@@ -347,21 +264,22 @@ static inline void process_one_event(uint8_t* messages, int64_t offset, uint8_t 
             };
             (*headLocal)++;
         }
-        header->ActiveCount++;
+        count++;
     }
     else if (statusHigh == 0x80)
     {
-        if (header->ActiveCount > 0)
+        if (count > 0)
         {
-            header->ActiveCount--;
-            if (header->ActiveCount == 0)
+            count--;
+            if (count == 0)
             {
-                int absid = header->ActiveAbsId;
+                int absid = khdr_absid[headerIdx];
                 if (absid >= *headLocal - (maskLocal + 1))
                     ringLocal[absid & maskLocal].EndTick = tick;
             }
         }
     }
+    khdr_activecount[headerIdx] = count;
 }
 
 #if HAVE_SSSE3
@@ -373,7 +291,7 @@ static const uint8_t KeyShuffleMaskBytes[16] __attribute__((aligned(16))) = {
 };
 #endif
 
-static int64_t process_run_events(uint8_t* messages, uint8_t track, KeyHeader* keyheader,
+static int64_t process_run_events(uint8_t* messages, uint8_t track, int32_t* khdr_absid, uint16_t* khdr_activecount,
     RenderNote* ringLocal, int maskLocal, int64_t currentOffset, int64_t runEnd, int64_t tick, int* headLocal)
 {
 #if HAVE_SSSE3
@@ -397,7 +315,7 @@ static int64_t process_run_events(uint8_t* messages, uint8_t track, KeyHeader* k
             uint8_t key    = (uint8_t)(keyPacked >> (lane * 8));
 
             process_one_event(messages, currentOffset + lane, status, key, track,
-                keyheader, ringLocal, maskLocal, tick, headLocal);
+                khdr_absid, khdr_activecount, ringLocal, maskLocal, tick, headLocal);
         }
         currentOffset += 4;
     }
@@ -407,7 +325,7 @@ static int64_t process_run_events(uint8_t* messages, uint8_t track, KeyHeader* k
     {
         uint8_t* synthev = messages + currentOffset * 3;
         process_one_event(messages, currentOffset, synthev[0], synthev[1], track,
-            keyheader, ringLocal, maskLocal, tick, headLocal);
+            khdr_absid, khdr_activecount, ringLocal, maskLocal, tick, headLocal);
         currentOffset++;
     }
     return currentOffset;
@@ -484,7 +402,7 @@ static void sweep_range(int64_t fromTick, int64_t toTick)
 
         if (trackGroups.data == NULL || trackGroups.count == 0)
         {
-            currentOffset = process_run_events(messages, 0, keyHeaders, ring, mask,
+            currentOffset = process_run_events(messages, 0, khdr_absid, khdr_activecount, ring, mask,
                 currentOffset, nextOffset, tick, &headLocal);
         }
         else
@@ -493,7 +411,7 @@ static void sweep_range(int64_t fromTick, int64_t toTick)
             {
                 if (groupIdx >= trackGroups.count)
                 {
-                    currentOffset = process_run_events(messages, 0, keyHeaders, ring, mask,
+                    currentOffset = process_run_events(messages, 0, khdr_absid, khdr_activecount, ring, mask,
                         currentOffset, nextOffset, tick, &headLocal);
                     break;
                 }
@@ -503,7 +421,7 @@ static void sweep_range(int64_t fromTick, int64_t toTick)
                 if (runEnd > nextOffset) runEnd = nextOffset;
 
                 uint8_t track = group->track;
-                currentOffset = process_run_events(messages, track, keyHeaders, ring, mask,
+                currentOffset = process_run_events(messages, track, khdr_absid, khdr_activecount, ring, mask,
                     currentOffset, runEnd, tick, &headLocal);
 
                 if (currentOffset >= group->event_offset + group->count)
@@ -517,7 +435,7 @@ static void sweep_range(int64_t fromTick, int64_t toTick)
 
 static void advance_tail(int viewStart)
 {
-    int safeTail = headIdx - ringCap;
+    int safeTail = headIdx - ringCapacity;
     if (tailIdx < safeTail) tailIdx = safeTail;
 
     int forceCullThresh = lookaheadTicks * 2;
@@ -544,26 +462,77 @@ static void advance_tail(int viewStart)
     tailIdx = tailLocal;
 }
 
+static void upload_palette(void)
+{
+    uint8_t paletteData[256 * 3];
+    for (int i = 0; i < 256; i++)
+    {
+        uint32_t c = (uint32_t)(rand() % (0x1000000 - 0x808080) + 0x808080);
+        paletteData[i * 3 + 0] = (c >> 16) & 0xFF;
+        paletteData[i * 3 + 1] = (c >> 8) & 0xFF;
+        paletteData[i * 3 + 2] = c & 0xFF;
+    }
+    glBindTexture(GL_TEXTURE_1D, paletteTex);
+    glTexImage1D(GL_TEXTURE_1D, 0, GL_RGB8, 256, 0, GL_RGB, GL_UNSIGNED_BYTE, paletteData);
+    glTexParameteri(GL_TEXTURE_1D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glBindTexture(GL_TEXTURE_1D, 0);
+    paletteUploadPending = 0;
+}
+
+static void draw_notes(int viewStart, int viewEnd, int32_t tick, float yBottom, float yTop)
+{
+    float yStep = (yTop - yBottom) / 128.0f;
+    glUseProgram(lineShader);
+    glUniform3f(u_metrics, pixelsPerTick, yBottom, yStep);
+    glUniform1i(u_viewStart, viewStart);
+    glUniform1i(u_viewEnd, viewEnd);
+    glUniform1i(u_glowEnabled, EnableGlow);
+    glUniform1i(u_transparencyEnabled, EnableTransparency);
+    glUniform1i(u_currentTick, tick);
+
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_1D, paletteTex);
+    glBindVertexArray(vao);
+
+    int startIdx = tailIdx & mask;
+    if (startIdx + NotesDrawnLastFrame <= ringCapacity)
+    {
+        glDrawArraysInstancedBaseInstance(GL_TRIANGLE_STRIP, 0, 4, NotesDrawnLastFrame, startIdx);
+    }
+    else
+    {
+        int firstChunk = ringCapacity - startIdx;
+        int secondChunk = NotesDrawnLastFrame - firstChunk;
+        glDrawArraysInstancedBaseInstance(GL_TRIANGLE_STRIP, 0, 4, firstChunk, startIdx);
+        glDrawArraysInstancedBaseInstance(GL_TRIANGLE_STRIP, 0, 4, secondChunk, 0);
+    }
+
+    glBindVertexArray(0);
+    glBindTexture(GL_TEXTURE_1D, 0);
+    glUseProgram(0);
+}
+
+static void draw_cursor(float cursorX, int screenWidth, float yBottom, float yTop)
+{
+    glUseProgram(cursorShader);
+    glUniform1f(uc_cursorX, cursorX);
+    glUniform1f(uc_halfWidth, 1.0f / (float)screenWidth);
+    glUniform1f(uc_yBottom, yBottom);
+    glUniform1f(uc_yTop, yTop);
+    glUniform3f(uc_lineColor, 1.0f, 0.0f, 0.0f);
+
+    glBindVertexArray(cursorVAO);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    glBindVertexArray(0);
+    glUseProgram(0);
+}
+
 void Renderer_Render(int screenWidth, int screenHeight, int32_t tick, int pad)
 {
     if (!midiloaded || !isInitialized) return;
 
     if (paletteUploadPending)
-    {
-        uint8_t paletteData[256 * 3];
-        for (int i = 0; i < 256; i++)
-        {
-            uint32_t c = (uint32_t)(rand() % (0x1000000 - 0x808080) + 0x808080);
-            paletteData[i * 3 + 0] = (c >> 16) & 0xFF;
-            paletteData[i * 3 + 1] = (c >> 8) & 0xFF;
-            paletteData[i * 3 + 2] = c & 0xFF;
-        }
-        glBindTexture(GL_TEXTURE_1D, paletteTex);
-        glTexImage1D(GL_TEXTURE_1D, 0, GL_RGB8, 256, 0, GL_RGB, GL_UNSIGNED_BYTE, paletteData);
-        glTexParameteri(GL_TEXTURE_1D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-        glBindTexture(GL_TEXTURE_1D, 0);
-        paletteUploadPending = 0;
-    }
+        upload_palette();
 
     if (deferredRingCap > 0)
     {
@@ -571,18 +540,12 @@ void Renderer_Render(int screenWidth, int screenHeight, int32_t tick, int pad)
         deferredRingCap = -1;
     }
 
-    int tickstationary = (int)(tick / WindowTicks) * WindowTicks;
-    int viewStart = stationarynotes? tickstationary : (tick - (WindowTicks >> 1)); 
-    if (viewStart < 0) 
-        viewStart = 0; 
-    if (viewStart > maxTick) 
-        viewStart = maxTick;
-    
-    int viewEnd = viewStart + WindowTicks; 
-    if (viewEnd < 0) 
-        viewEnd = 0; 
-    if (viewEnd > maxTick) 
-        viewEnd = maxTick;
+    // zoom keys and dynamic scroll can push this to 0 (division by zero below) or overflow int math
+    WindowTicks = MAX(1, MIN(WindowTicks, MAX_WINDOW_TICKS));
+
+    int viewStart = stationarynotes ? (tick / WindowTicks) * WindowTicks : (tick - (WindowTicks >> 1));
+    viewStart = MAX(0, MIN(viewStart, maxTick));
+    int viewEnd = MIN(viewStart + WindowTicks, maxTick);
 
     if (WindowTicks != lastWindowTicks)
     {
@@ -598,9 +561,9 @@ void Renderer_Render(int screenWidth, int screenHeight, int32_t tick, int pad)
     {
         headIdx = 1;
         tailIdx = 1;
-        memset(keyHeaders, 0, TOTAL_KEYS * sizeof(KeyHeader));
-        int from = viewStart - WindowTicks;
-        sweep_range(from > 0 ? from : 0, sweepEnd);
+        memset(khdr_activecount,0, TOTAL_KEYS * sizeof(uint16_t));
+        memset(khdr_absid,0, TOTAL_KEYS * sizeof(int32_t));
+        sweep_range(MAX(viewStart - WindowTicks, 0), sweepEnd);
     }
     else
     {
@@ -611,57 +574,12 @@ void Renderer_Render(int screenWidth, int screenHeight, int32_t tick, int pad)
     advance_tail(viewStart);
 
     NotesDrawnLastFrame = headIdx - tailIdx;
-    RingCap = ringCap;
+    RingCap = ringCapacity;
 
     float yBottom = -1.0f + 2.0f * pad / screenHeight;
     float yTop = 1.0f - 2.0f * pad / screenHeight;
-    
+
     if (NotesDrawnLastFrame > 0)
-    {
-        float yStep = (yTop - yBottom) / 128.0f;
-        glUseProgram(lineShader);
-        glUniform3f(u_metrics, pixelsPerTick, yBottom, yStep);
-        glUniform1i(u_viewStart, viewStart);
-        glUniform1i(u_viewEnd, viewEnd);
-        glUniform1i(u_glowEnabled, EnableGlow);
-        glUniform1i(u_transparencyEnabled, EnableTransparency);
-        glUniform1i(u_currentTick, tick);
-
-        glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_1D, paletteTex);
-
-        glBindVertexArray(vao);
-
-        int startIdx = tailIdx & mask;
-        if (startIdx + NotesDrawnLastFrame <= ringCap)
-        {
-            glDrawArraysInstancedBaseInstance(GL_TRIANGLE_STRIP, 0, 4, NotesDrawnLastFrame, startIdx);
-        }
-        else
-        {
-            int firstChunk = ringCap - startIdx;
-            int secondChunk = NotesDrawnLastFrame - firstChunk;
-            glDrawArraysInstancedBaseInstance(GL_TRIANGLE_STRIP, 0, 4, firstChunk, startIdx);
-            glDrawArraysInstancedBaseInstance(GL_TRIANGLE_STRIP, 0, 4, secondChunk, 0);
-        }
-
-        glBindVertexArray(0);
-        glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_1D, 0);
-        glUseProgram(0);
-    }
-    float cursorX = (float)(tick - viewStart) * pixelsPerTick - 1.0f;
-    float halfWidthNDC = 1.0f / (float)screenWidth;
-
-    glUseProgram(cursorShader);
-    glUniform1f(uc_cursorX, cursorX);
-    glUniform1f(uc_halfWidth, halfWidthNDC);
-    glUniform1f(uc_yBottom, yBottom);
-    glUniform1f(uc_yTop, yTop);
-    glUniform3f(uc_lineColor, 1.0f, 0.0f, 0.0f);
-
-    glBindVertexArray(cursorVAO);
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-    glBindVertexArray(0);
-    glUseProgram(0);
+        draw_notes(viewStart, viewEnd, tick, yBottom, yTop);
+    draw_cursor((float)(tick - viewStart) * pixelsPerTick - 1.0f, screenWidth, yBottom, yTop);
 }

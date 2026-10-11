@@ -12,31 +12,51 @@ KDM_LSEND KDMAPI_SendDirectLongData;
 KDM_LSEND KDMAPI_PrepareLongData;
 KDM_LSEND KDMAPI_UnprepareLongData;
 #endif
-int32_t hasvoice = 0;
+int hasvoice = 0;
 
-int32_t KDMAPI_Setup()
+#define REQUIRE_SYM(var, type, name)                                      \
+    if (((var) = (type)GET_FUNC(KDMAPI_libHandle, name)) == NULL)         \
+    {                                                                     \
+        puts("[KDMAPI] GetProcAddress failed for " name ".");             \
+        goto fail;                                                        \
+    }
+
+int KDMAPI_Setup(void)
 {
+    if (KDMAPI_libHandle)
+        return 1; // already loaded (synth reinit), the stream is restarted by the caller
+
 #if defined(_WIN32) || defined(_WIN64)
-    KDMAPI_libHandle = LOAD_LIB("OmniMIDI");    
-    if ((KDMAPI_PrepareLongData = (KDM_LSEND)GET_FUNC(KDMAPI_libHandle, "PrepareLongData")) == NULL)
-        {puts("[KDMAPI] GetProcAddress failed for PrepareLongData."); return 0;}
-    if ((KDMAPI_UnprepareLongData = (KDM_LSEND)GET_FUNC(KDMAPI_libHandle, "UnprepareLongData")) == NULL)
-        {puts("[KDMAPI] GetProcAddress failed for UnprepareLongData."); return 0;}
+    KDMAPI_libHandle = LOAD_LIB("OmniMIDI");
 #else
-    KDMAPI_libHandle = LOAD_LIB("libOmniMIDI.so");        
+    KDMAPI_libHandle = LOAD_LIB("libOmniMIDI.so");
 #endif
     if (!KDMAPI_libHandle)
-        {puts("KDMAPI Load failed!"); return 0;}
-    if ((KDMAPI_InitializeKDMAPIStream = (KDM_INIT)GET_FUNC(KDMAPI_libHandle, "InitializeKDMAPIStream")) == NULL) 
-        {puts("[KDMAPI] GetProcAddress failed for InitializeKDMAPIStream."); return 0;}
-    if ((KDMAPI_SendDirectData = (KDM_SEND)GET_FUNC(KDMAPI_libHandle, "SendDirectData")) == NULL)
-        {puts("[KDMAPI] GetProcAddress failed for SendDirectData."); return 0;}
-    if ((KDMAPI_SendDirectLongData = (KDM_LSEND)GET_FUNC(KDMAPI_libHandle, "SendDirectLongData")) == NULL)
-        {puts("[KDMAPI] GetProcAddress failed for SendDirectLongData."); return 0;}
-    if ((KDMAPI_TerminateKDMAPIStream = (KDM_INIT)GET_FUNC(KDMAPI_libHandle, "TerminateKDMAPIStream")) == NULL)
-        {puts("[KDMAPI] GetProcAddress failed for TerminateKDMAPIStream."); return 0;}
+    {
+        puts("KDMAPI Load failed!");
+        return 0;
+    }
+
+    REQUIRE_SYM(KDMAPI_InitializeKDMAPIStream, KDM_INIT, "InitializeKDMAPIStream");
+    REQUIRE_SYM(KDMAPI_TerminateKDMAPIStream, KDM_INIT, "TerminateKDMAPIStream");
+    REQUIRE_SYM(KDMAPI_SendDirectData, KDM_SEND, "SendDirectData");
+    REQUIRE_SYM(KDMAPI_SendDirectLongData, KDM_LSEND, "SendDirectLongData");
+#if defined(_WIN32) || defined(_WIN64)
+    REQUIRE_SYM(KDMAPI_PrepareLongData, KDM_LSEND, "PrepareLongData");
+    REQUIRE_SYM(KDMAPI_UnprepareLongData, KDM_LSEND, "UnprepareLongData");
+#endif
+    // optional
     if ((KDMAPI_GetVoiceCount = (KDM_DEBUG)GET_FUNC(KDMAPI_libHandle, "GetVoiceCount")) != NULL)
-        {puts("this omnimidi has voicecount enabled! outputting in playback stats"); hasvoice = 1; }
+    {
+        puts("this omnimidi has voicecount enabled! outputting in playback stats");
+        hasvoice = 1;
+    }
     puts("KDMAPI loaded!");
     return 1;
+
+fail:
+    FREE_LIB(KDMAPI_libHandle);
+    KDMAPI_libHandle = NULL;
+    return 0;
 }
+#undef REQUIRE_SYM

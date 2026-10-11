@@ -3,6 +3,7 @@
 #include "../parse/midistorage.h"
 #include "../playback/playback_thread.h"
 #include "../playback/timer.h"
+#include "../misc/util.h"
 #include "../parse/parser.h"
 #include "../synth/sound.h"
 #include "../third_party/conmidi_digit_formatter.h"
@@ -13,9 +14,6 @@
 #include <string.h>
 #include <math.h>
 
-#define MIN(a, b) (((a) < (b)) ? (a) : (b))
-#define MAX(a, b) (((a) > (b)) ? (a) : (b))
-
 int dynascroll = 0;
 double scrollfactor = 1.0;
 typedef struct
@@ -24,26 +22,8 @@ typedef struct
     const char** filedirs;
 } playlist_t;
 
-#if defined(_WIN32) || defined(_WIN64)
-#include <windows.h>
-
-static HANDLE backgroundthread = NULL;
-static DWORD WINAPI playback_thread_entry(LPVOID arg)
+static void run_playlist(playlist_t* playlist)
 {
-    StartPlayback((int)(intptr_t)arg);
-    return 0;
-}
-
-static void spawn_playback_thread(int singlethread)
-{
-    if (backgroundthread)
-        CloseHandle(backgroundthread);
-    backgroundthread = CreateThread(NULL, 0, playback_thread_entry, (LPVOID)(intptr_t)singlethread, 0, NULL);
-}
-
-static DWORD WINAPI playlist_thread_entry(LPVOID arg)
-{
-    playlist_t* playlist = (playlist_t*)arg;
     int playlist_cnt = playlist->count;
     const char** files = playlist->filedirs;
     for (int i = 0; i < playlist_cnt; i++)
@@ -61,87 +41,58 @@ static DWORD WINAPI playlist_thread_entry(LPVOID arg)
         free((void*)files[i]);
     free(files);
     free(playlist);
-    return 0;
 }
 
-static void spawn_playlist_thread(playlist_t* playlist)
+static void run_load(char* filepath)
 {
-    if (backgroundthread)
-        CloseHandle(backgroundthread);
-    backgroundthread = CreateThread(NULL, 0, playlist_thread_entry, (LPVOID)playlist, 0, NULL);
+    if (LoadMIDI(filepath))
+        Renderer_InitForMIDI();
+    free(filepath);
 }
 
-static DWORD WINAPI loading_thread_entry(void* arg)
+// only the thread entry signature and spawn call differ per platform, the bodies above are shared
+#if defined(_WIN32) || defined(_WIN64)
+#include <windows.h>
+#define THREAD_FN(name) static DWORD WINAPI name(LPVOID arg)
+#define THREAD_DONE return 0
+static void spawn_thread(LPTHREAD_START_ROUTINE fn, void* arg)
 {
-    LoadMIDI((const char*)arg);
-    Renderer_InitForMIDI();
-    return 0;
-}
-
-static void spawn_loading_thread(const char* filepath)
-{
-    const char* filepath_local = strdup(filepath);
-    backgroundthread = CreateThread(NULL, 0, loading_thread_entry, (LPVOID)filepath_local, 0, NULL);
+    HANDLE handle = CreateThread(NULL, 0, fn, arg, 0, NULL);
+    if (handle)
+        CloseHandle(handle);
 }
 #else
 #include <pthread.h>
-
-static pthread_t backgroundThread;
-
-static void* playback_thread_entry(void* arg)
+#define THREAD_FN(name) static void* name(void* arg)
+#define THREAD_DONE return NULL
+static void spawn_thread(void* (*fn)(void*), void* arg)
 {
-    StartPlayback((int)(intptr_t)arg);
-    return NULL;
-}
-
-static void spawn_playback_thread(int singlethread)
-{
-    pthread_create(&backgroundThread, NULL, playback_thread_entry, (void*)(intptr_t)singlethread);
-}
-
-static void* playlist_thread_entry(void* arg)
-{
-    playlist_t* playlist = (playlist_t*)arg;
-    int playlist_cnt = playlist->count;
-    const char** files = playlist->filedirs;
-    for (int i = 0; i < playlist_cnt; i++)
-    {
-        if (LoadMIDI(files[i]))
-        {
-            Renderer_InitForMIDI();
-            printf("\n%d/%d files played, %s is up next\n", i + 1, playlist_cnt, files[i]);
-            StartPlayback(singlethread);
-            Renderer_ResetForUnload();
-            UnloadMIDI();
-        }
-    }
-    for (int i = 0; i < playlist_cnt; i++)
-        free((void*)files[i]);
-    free(files);
-    free(playlist);
-    return NULL;
-}
-
-static void spawn_playlist_thread(playlist_t* playlist)
-{
-    pthread_create(&backgroundThread, NULL, playlist_thread_entry, (void*)playlist);
-}
-
-static void* loading_thread_entry(void* arg)
-{
-    LoadMIDI((const char*)arg);
-    Renderer_InitForMIDI();
-    return NULL;
-}
-
-static void spawn_loading_thread(const char* filepath)
-{
-    const char* filepath_local = strdup(filepath);
-    pthread_create(&backgroundThread, NULL, loading_thread_entry, (void*)filepath_local);
+    pthread_t thread;
+    if (pthread_create(&thread, NULL, fn, arg) == 0)
+        pthread_detach(thread);
 }
 #endif
 
+THREAD_FN(playback_thread_entry) { StartPlayback((int)(intptr_t)arg); THREAD_DONE; }
+THREAD_FN(playlist_thread_entry) { run_playlist((playlist_t*)arg); THREAD_DONE; }
+THREAD_FN(loading_thread_entry)  { run_load((char*)arg); THREAD_DONE; }
+
+static void spawn_playback_thread(int singlethread) { spawn_thread(playback_thread_entry, (void*)(intptr_t)singlethread); }
+static void spawn_playlist_thread(playlist_t* playlist) { spawn_thread(playlist_thread_entry, playlist); }
+static void spawn_loading_thread(const char* filepath) { spawn_thread(loading_thread_entry, strdup(filepath)); }
+
 static GLFWwindow* win;
+
+// would get the primary monitor if my sway env didnt make my worse monitor the primary one
+static int monitor_refresh_rate(void)
+{
+    int count = 0, highest_rr = 0;
+    GLFWmonitor** monitors = glfwGetMonitors(&count);
+    for (int i = 0; i < count; i++)
+        highest_rr = MAX(glfwGetVideoMode(monitors[i])->refreshRate, 60);
+    if (!monitors) puts("couldnt get monitors. defaulting to 60");
+    return highest_rr;
+}
 
 static void glfw_error_callback(int code, const char* desc)
 {
@@ -216,7 +167,7 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
             if (stationarynotes) scrollfactor = MAX((int)(WindowTicks / ppq), 1);
         }
         if (key == GLFW_KEY_V)
-            targetfps = targetfps? 0 : glfwGetVideoMode(glfwGetPrimaryMonitor())->refreshRate;
+            targetfps = targetfps? 0 : monitor_refresh_rate();
         if (key == GLFW_KEY_Q)
             reinitsynths();   
         if (key == GLFW_KEY_R)
@@ -225,10 +176,10 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
     if (action != GLFW_RELEASE)
     {
         if (key == GLFW_KEY_RIGHT)
-            clock_skip(tickscale, 0);
+            clock_skip(tickscale);
 
         if (key == GLFW_KEY_LEFT)
-            clock_skip(tickscale * -1, 0);
+            clock_skip(-tickscale);
 
         if (key == GLFW_KEY_UP)
         {
@@ -262,7 +213,7 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
     }
 }
 
-void drop_callback(GLFWwindow* w, int count, const char** paths)
+static void drop_callback(GLFWwindow* w, int count, const char** paths)
 {
     if (count == 1)
     {
@@ -358,7 +309,7 @@ void Window_Run(const char* filepath)
     const int PAD = 20;
     double smoothed_fps = 0.0;
     glfwSetDropCallback(win, drop_callback);
-    targetfps = glfwGetVideoMode(glfwGetPrimaryMonitor())->refreshRate;
+    targetfps = monitor_refresh_rate();
     last_time = get_time();
     
     while (!glfwWindowShouldClose(win))

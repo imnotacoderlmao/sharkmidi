@@ -1,3 +1,7 @@
+#ifndef TYPED_ARRAY_H
+#define TYPED_ARRAY_H
+#include <stdint.h>
+#include <stdlib.h>
 #define DEFINE_ARRAY(T)                                                      \
 typedef struct                                                               \
 {                                                                            \
@@ -21,3 +25,4 @@ static void T##_arr_free(T##_arr* a)                                         \
     free(a->data);                                                           \
     *a = (T##_arr){0};                                                       \
 }                                                                            
+#endif
