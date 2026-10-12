@@ -26,26 +26,26 @@ typedef struct
     uint32_t length;
 } trackProperties;
 
+// one tick's worth of events in one track. 16 bytes instead of the old 24, because the global
+// offset reuses the tick field once the timing merge no longer needs it
 typedef struct
 {
-    int64_t tick;
-    uint32_t count;
-    uint32_t notecount;
-    uint32_t group_idx;
-    uint16_t track;
-} ExtendedTickGroup;
+    union { int64_t tick; int64_t offset; };
+    uint32_t count;     // events in the group
+    uint32_t notecount; // note-ons in the group
+} TrackTick;
 
+uint8_t* filePtr = NULL;
 uint64_t fileLen = 0;
 uint64_t filePos = 0;
-uint64_t eventcount = 0;
 uint32_t headersize = 0; 
-uint32_t fmt = 0;
 uint16_t trackAmount = 0;
-uint8_t* filePtr = NULL;
-int midiloaded = 0, trackcolors = 1;
+uint32_t fmt = 0;
+int32_t midiloaded = 0, trackcolors = 1;
+uint64_t eventcount = 0;
 
 DEFINE_ARRAY(trackProperties);
-DEFINE_ARRAY(TickGroup);
+DEFINE_ARRAY(TrackTick);
 DEFINE_ARRAY(TempoEvent);
 DEFINE_ARRAY(SysExEvent);
 
@@ -194,7 +194,7 @@ static uint16_t ReadUInt16(void)
 
 static int SearchText(char* text)
 {
-    for (int i = 0; i < strlen(text); i++)
+    for (int32_t i = 0; i < strlen(text); i++)
     {
         if (filePos >= fileLen) 
             return 0;
@@ -244,13 +244,6 @@ int IndexTrack(trackProperties_arr* tracklistptr)
     return 0;
 }
 
-static int cmp_extended_tickgroup(const void* a, const void* b)
-{
-    int64_t posa = ((const ExtendedTickGroup*)a)->tick;
-    int64_t posb = ((const ExtendedTickGroup*)b)->tick;
-    return (posa > posb) - (posa < posb);
-}
-
 static int cmp_tempo(const void* a, const void* b)
 {
     int64_t posa = ((const TempoEvent*)a)->tick;
@@ -265,17 +258,77 @@ static int cmp_sysex(const void* a, const void* b)
     return (posa > posb) - (posa < posb);
 }
 
-int64_t CountTrackEvents(uint8_t* trackPtr, uint8_t* trackEnd, TickGroup_arr* tickgroup)
+#define UNLIKELY(x) __builtin_expect(!!(x), 0)
+
+// cold path of the group array growth (same policy as TrackTick_arr_push)
+__attribute__((noinline, cold))
+static void tg_grow(TrackTick_arr* a)
+{
+    a->cap = a->cap < 1024 ? 1024 : a->cap * 2;
+    a->data = realloc(a->data, a->cap * sizeof(TrackTick));
+}
+
+// peeks at the next event and says whether it is a plain channel event with a 1 or 2 byte delta,
+// which is what the fast loops handle. nothing is consumed or modified
+static inline __attribute__((always_inline))
+int peek_channel_event(const uint8_t* p, uint32_t* delta, const uint8_t** q, uint32_t* ev)
+{
+    uint32_t b0 = p[0], b1 = p[1];
+    if (b0 < 0x80) { *delta = b0; *q = p + 1; }
+    else if (b1 < 0x80) { *delta = ((b0 & 0x7F) << 7) | b1; *q = p + 2; }
+    else return 0;
+    *ev = **q;
+    return *ev < 0xF0;
+}
+
+int64_t CountTrackEvents(uint8_t* trackPtr, uint8_t* trackEnd, TrackTick_arr* tickgroup)
 {
     int64_t totalnotes_local = 0;
     int64_t eventcount_local = 0;
     int64_t absolutetime = 0;
     uint8_t prevEvent = 0;
-    uint64_t count = 0;
+    uint32_t count = 0;
     uint32_t notecount = 0;
-    
+    // the group array lives in locals for the whole function and is written back on exit
+    TrackTick* data = tickgroup->data;
+    int64_t n = tickgroup->count, cap = tickgroup->cap;
+    #define TG_ENSURE() do { if (UNLIKELY(n >= cap)) { tickgroup->count = n; tg_grow(tickgroup); data = tickgroup->data; cap = tickgroup->cap; } } while (0)
+
     while (trackPtr < trackEnd)
     {
+        // fast path: plain channel events with a 1 or 2 byte delta. 8 bytes of margin cover every byte it peeks at.
+        // anything unusual breaks out BEFORE touching any state, so the generic code below sees the event untouched
+        while (trackEnd - trackPtr >= 8)
+        {
+            uint32_t delta, ev;
+            const uint8_t* q;
+            if (UNLIKELY(!peek_channel_event(trackPtr, &delta, &q, &ev))) break;
+
+            // close the current group when time advances, without a branch: the slot is always written,
+            // the index only moves if the group really ended
+            TG_ENSURE();
+            data[n] = (TrackTick){.tick = absolutetime, .count = count, .notecount = notecount};
+            uint32_t flush = (delta != 0) & (count != 0);
+            uint32_t keep = flush - 1;
+            n += flush;
+            eventcount_local += count & ~keep;
+            totalnotes_local += notecount & ~keep;
+            count &= keep;
+            notecount &= keep;
+            absolutetime += delta;
+            uint32_t st = ev;
+            if (ev >= 0x80) { prevEvent = ev; q++; }
+            else st = prevEvent;
+            count++;
+            // program change / channel pressure have one data byte. the length stays a predicted branch so the
+            // next event's address doesn't wait on this event's bytes
+            if (UNLIKELY((st & 0xE0) == 0xC0)) { trackPtr = (uint8_t*)q + 1; continue; }
+            notecount += ((st & 0xF0) == 0x90) & (q[1] != 0);
+            trackPtr = (uint8_t*)q + 2;
+        }
+        if (trackPtr >= trackEnd) break;
+
+        // generic path: one event, anything goes (tail of the track, meta, sysex, long deltas)
         int64_t delta = *trackPtr++;
         if (delta >= 0x80)
             delta = varlen_decode_slow(&delta, &trackPtr);
@@ -283,8 +336,8 @@ int64_t CountTrackEvents(uint8_t* trackPtr, uint8_t* trackEnd, TickGroup_arr* ti
         {
             if (count > 0)
             {
-                TickGroup group = {absolutetime, notecount, count};
-                TickGroup_arr_push(tickgroup, group);
+                TG_ENSURE();
+                data[n++] = (TrackTick){.tick = absolutetime, .count = count, .notecount = notecount};
                 eventcount_local += count;
                 totalnotes_local += notecount;
                 notecount = 0;
@@ -354,39 +407,109 @@ int64_t CountTrackEvents(uint8_t* trackPtr, uint8_t* trackEnd, TickGroup_arr* ti
             maxTick = absolutetime;
         if (count > 0)
         {
-            TickGroup group = {absolutetime, notecount, count};
-            TickGroup_arr_push(tickgroup, group);
+            TG_ENSURE();
+            data[n++] = (TrackTick){.tick = absolutetime, .count = count, .notecount = notecount};
             eventcount_local += count;
             totalnotes_local += notecount;
         }
+        tickgroup->count = n;
         ATOMIC_ADD(totalnotes, totalnotes_local);
         return eventcount_local;
+    #undef TG_ENSURE
 }
 
-int64_t ParseTrackEvents(uint8_t* trackPtr, uint8_t* trackEnd, uint24_t* msgPtr, TickGroup_arr* trackHistogram, TempoEvent_arr* tempo, SysExEvent_arr* sysex, uint8_t track)
+// decodes one channel event (q points at its status or, with running status, its first data byte),
+// stores it and returns the pointer past it. branchless apart from the status byte check
+static inline __attribute__((always_inline))
+const uint8_t* decode_store(const uint8_t* q, uint32_t ev, uint8_t* prevEvent, uint24_t* dst, int64_t* notecount)
+{
+    uint32_t st = ev;
+    if (ev >= 0x80) { *prevEvent = (uint8_t)ev; q++; }
+    else st = *prevEvent;
+    uint32_t d1 = q[0];
+    // the event length stays a predicted branch (not arithmetic on loaded data) so the next event's address
+    // doesn't wait on this event's bytes. program change / channel pressure have a single data byte
+    if (UNLIKELY((st & 0xE0) == 0xC0))
+    {
+        uint24_set(dst, (int32_t)(st | (d1 << 8)));
+        return q + 1;
+    }
+    uint32_t d2 = q[1];
+    uint32_t ison = (st & 0xF0) == 0x90;
+    uint32_t vel0 = ison & (d2 == 0);         // note on with velocity 0 is stored as note off with velocity 64
+    *notecount += ison & (d2 != 0);
+    uint32_t d2out = vel0 ? 64u : d2;
+    uint24_set(dst, (int32_t)((st ^ (vel0 << 4)) | (d1 << 8) | (d2out << 16)));
+    return q + 2;
+}
+
+// groupOffsets: start offset in msgPtr of each tick group of this track. NULL means the track's groups are
+// back to back in msgPtr (no other track interleaves), then they start at startOffset and nothing needs looking up
+int64_t ParseTrackEvents(uint8_t* trackPtr, uint8_t* trackEnd, uint24_t* msgPtr, const int64_t* groupOffsets, int64_t groupCount, int64_t startOffset, TempoEvent_arr* tempo, SysExEvent_arr* sysex, uint8_t track)
 {
     int64_t absolutetime = 0;
     int64_t notecount = 0;
     uint8_t prevEvent = 0;
 
     uint32_t group_idx = 0;
-    int64_t write_pos = 0;
+    int64_t write_pos = startOffset;
     uint32_t events_in_group = 0;
 
-    if (trackHistogram->count > 0)
-        write_pos = trackHistogram->data[0].event_offset;
+    int64_t next_off = 0; // start of the following group, preloaded so a group switch doesn't wait on a load
+    if (groupOffsets && groupCount > 0)
+    {
+        write_pos = groupOffsets[0];
+        next_off = groupOffsets[1];
+    }
 
     while (trackPtr < trackEnd)
     {
+        // fast loops: plain channel events only, 8 bytes of margin cover everything they peek at. unusual events
+        // break out before any state changes, so the generic code below sees them untouched
+        if (!groupOffsets)
+        {
+            while (trackEnd - trackPtr >= 8)
+            {
+                uint32_t delta, ev;
+                const uint8_t* q;
+                if (UNLIKELY(!peek_channel_event(trackPtr, &delta, &q, &ev))) break;
+                absolutetime += delta;
+                trackPtr = (uint8_t*)decode_store(q, ev, &prevEvent, &msgPtr[write_pos++], &notecount);
+            }
+        }
+        else
+        {
+            while (trackEnd - trackPtr >= 8)
+            {
+                uint32_t delta, ev;
+                const uint8_t* q;
+                if (UNLIKELY(!peek_channel_event(trackPtr, &delta, &q, &ev))) break;
+                // time advanced and the group has events: continue at the next group's start
+                uint32_t newgroup = (delta != 0) & (events_in_group != 0);
+                if (newgroup)
+                {
+                    group_idx++;
+                    write_pos = next_off;
+                    next_off = groupOffsets[group_idx + 1]; // two spare entries, so this is readable up to the end
+                }
+                events_in_group = 1;
+                absolutetime += delta;
+                trackPtr = (uint8_t*)decode_store(q, ev, &prevEvent, &msgPtr[write_pos++], &notecount);
+            }
+        }
+        if (trackPtr >= trackEnd) break;
+
+        // generic path: one event, anything goes
         int64_t delta = *trackPtr++;
         if (delta >= 0x80)
             delta = varlen_decode_slow(&delta, &trackPtr);
 
-        if (delta > 0 && events_in_group > 0)
+        if (groupOffsets && delta > 0 && events_in_group > 0)
         {
             group_idx++;
-            if (group_idx < trackHistogram->count)
-                write_pos = trackHistogram->data[group_idx].event_offset;
+            if (group_idx < groupCount)
+                write_pos = groupOffsets[group_idx];
+            next_off = groupOffsets[group_idx + 1];
             events_in_group = 0;
         }
 
@@ -498,12 +621,15 @@ int64_t ParseTrackEvents(uint8_t* trackPtr, uint8_t* trackEnd, uint24_t* msgPtr,
             if ((prevEvent & 0xE0) != 0xC0)
             {
                 uint8_t data2 = *trackPtr++;
-                if (data2 != 0)
-                    notecount++;
-                else 
+                if ((prevEvent & 0xF0) == 0x90)
                 {
-                    msgPtr[pos] = uint24_from(0x80 | (prevEvent & 0x0F) | (readEvent << 8) | (64 << 16));
-                    continue;
+                    if (data2 != 0)
+                        notecount++;
+                    else 
+                    {
+                        msgPtr[pos] = uint24_from(0x80 | (prevEvent & 0x0F) | (readEvent << 8) | (64 << 16));
+                        continue;
+                    }
                 }
                 msgPtr[pos] = uint24_from(prevEvent | (readEvent << 8) | (data2 << 16));
             }
@@ -554,6 +680,162 @@ void printparsestatistics(void)
 TempoEvent_arr tempos = {0};
 SysExEvent_arr sysexs = {0};
 
+typedef struct
+{
+    int64_t tick;
+    uint32_t track;
+} MergeNode;
+
+// ties go to the lower track so the result is deterministic (the old qsort was not stable)
+static inline int merge_less(MergeNode a, MergeNode b)
+{
+    return a.tick < b.tick || (a.tick == b.tick && a.track < b.track);
+}
+
+static void merge_sift_down(MergeNode* heap, int64_t n, int64_t i)
+{
+    MergeNode node = heap[i];
+    for (;;)
+    {
+        int64_t child = 2 * i + 1;
+        if (child >= n) break;
+        if (child + 1 < n && merge_less(heap[child + 1], heap[child])) child++;
+        if (!merge_less(heap[child], node)) break;
+        heap[i] = heap[child];
+        i = child;
+    }
+    heap[i] = node;
+}
+
+typedef struct
+{
+    int64_t curtick; // tick of the timing entry being built, -1 before the first
+    int64_t out;     // index of that entry
+    int64_t offset;  // events emitted so far
+    int64_t notes;   // note-ons emitted so far
+    int64_t entry;   // groups emitted so far
+} MergeState;
+
+static inline void merge_emit(MergeState* m, TrackTick* g, uint32_t track, int fill)
+{
+    if (g->tick != m->curtick)
+    {
+        m->curtick = g->tick;
+        m->out++;
+        if (fill)
+            timingArr[m->out] = (TickGroup){.tick = m->curtick, .notecount = m->notes, .event_offset = m->offset};
+    }
+    if (fill)
+    {
+        timingArr[m->out].notecount += g->notecount;
+        if (trackcolors)
+            trackGroups.data[m->entry] = (TrackGroup){.event_offset = m->offset, .count = g->count, .track = (uint8_t)(track << 4)};
+        g->offset = m->offset; // the track parser reads its write position from here
+    }
+    m->notes += g->notecount;
+    m->offset += g->count;
+    m->entry++;
+}
+
+// every track's groups are already sorted by tick, so a k-way merge yields the global order directly,
+// no flat copy of all groups and no qsort. fill=0 only counts distinct ticks so timingArr can be
+// allocated exactly, fill=1 builds timingArr/trackGroups and stores each group's eventArr offset.
+static int64_t merge_timing(TrackTick_arr* hist, int32_t tracks, int fill)
+{
+    MergeState m = {.curtick = -1, .out = -1};
+    MergeNode* heap = malloc((tracks + 1) * sizeof(MergeNode));
+    int64_t* pos = calloc(tracks + 1, sizeof(int64_t));
+    int64_t n = 0;
+    for (int32_t t = 0; t < tracks; t++)
+        if (hist[t].count > 0)
+            heap[n++] = (MergeNode){hist[t].data[0].tick, (uint32_t)t};
+    for (int64_t i = n / 2 - 1; i >= 0; i--)
+        merge_sift_down(heap, n, i);
+
+    while (n > 1)
+    {
+        uint32_t t = heap[0].track;
+        TrackTick* g = &hist[t].data[pos[t]];
+        merge_emit(&m, g, t, fill);
+        if (++pos[t] < hist[t].count)
+            heap[0].tick = g[1].tick;
+        else
+            heap[0] = heap[--n];
+        merge_sift_down(heap, n, 0);
+    }
+    if (n == 1) // one track left (or only ever one): plain walk, no heap
+    {
+        uint32_t t = heap[0].track;
+        for (int64_t j = pos[t]; j < hist[t].count; j++)
+            merge_emit(&m, &hist[t].data[j], t, fill);
+    }
+    free(heap);
+    free(pos);
+    return m.out + 1;
+}
+
+// distinct tick count without a merge pass: a single track's ticks are strictly increasing, otherwise mark
+// every group's tick in a bitmap and popcount it. returns -1 when the bitmap would be big next to the
+// groups themselves (very sparse, very long files), the caller then counts with the merge instead
+static int64_t count_distinct_ticks(TrackTick_arr* hist, int32_t tracks, int64_t total_entries)
+{
+    int32_t used = 0, only = 0;
+    for (int32_t t = 0; t < tracks; t++)
+        if (hist[t].count > 0) { used++; only = t; }
+    if (used == 0) return 0;
+    if (used == 1) return hist[only].count;
+
+    int64_t words = (maxTick >> 6) + 1;
+    if (words * 8 > total_entries * 4) return -1;
+    uint64_t* bits = calloc(words, sizeof(uint64_t));
+    if (!bits) return -1;
+    #ifdef _OPENMP
+        #pragma omp parallel for
+    #endif
+    for (int32_t t = 0; t < tracks; t++)
+        for (int64_t j = 0; j < hist[t].count; j++)
+        {
+            int64_t tick = hist[t].data[j].tick;
+            __atomic_fetch_or(&bits[tick >> 6], 1ull << (tick & 63), __ATOMIC_RELAXED);
+        }
+    int64_t distinct = 0;
+    for (int64_t w = 0; w < words; w++)
+        distinct += __builtin_popcountll(bits[w]);
+    free(bits);
+    return distinct;
+}
+
+// parsing needs each group's start offset in eventArr, so squeeze the 16 byte groups down to 8 byte offsets in
+// place. a track whose groups end up back to back (nothing from another track lands between them, always true
+// for a single track file) doesn't need them at all: only its first offset is kept and the array is released
+static void compact_offsets(TrackTick_arr* a, int64_t* start)
+{
+    *start = 0;
+    if (a->count == 0)
+        return;
+    TrackTick* src = a->data;
+    *start = src[0].offset;
+    int contiguous = 1;
+    for (int64_t j = 0; j + 1 < a->count; j++)
+        if (src[j + 1].offset != src[j].offset + src[j].count)
+        {
+            contiguous = 0;
+            break;
+        }
+    if (contiguous)
+    {
+        free(a->data);
+        a->data = NULL;
+        return;
+    }
+    int64_t* dst = (int64_t*)a->data;
+    for (int64_t j = 0; j < a->count; j++)
+        dst[j] = src[j].offset; // forward order, dst[j] only overwrites groups that were already read
+    void* p = realloc(a->data, (a->count + 2) * sizeof(int64_t)); // +2: spare entries the parse reads ahead
+    if (p) a->data = p;
+    ((int64_t*)a->data)[a->count] = ((int64_t*)a->data)[a->count + 1] = ((int64_t*)a->data)[a->count - 1];
+}
+
 int LoadMIDI(const char* filepath)
 {
     UnloadMIDI();
@@ -574,20 +856,22 @@ int LoadMIDI(const char* filepath)
     }
     updatestatsandprint("\ncounting events\n");
 
-    TickGroup_arr* histogram = calloc(trackAmount, sizeof(TickGroup_arr));
+    TrackTick_arr* histogram = calloc(trackAmount, sizeof(TrackTick_arr));
     double start = get_time();
     int32_t loadedtracks = 0;
     
     #ifdef _OPENMP
-        #pragma omp parallel for
+        #pragma omp parallel for schedule(dynamic, 1)
     #endif
     for(int32_t i = 0; i < trackAmount; i++)
     {
         trackProperties* currtrack = &tracks.data[i];
         uint8_t* trackstart = filePtr + currtrack->start;
         ATOMIC_ADD(eventcount, CountTrackEvents(trackstart, trackstart + currtrack->length, &histogram[i]));
+        TrackTick_arr_shrink(&histogram[i]); // drop the doubling slack, only tracks still being counted keep any
         ATOMIC_ADD(loadedtracks, 1);
         printf("(%s/%s) tracks scanned, %s notes counted\r", AddCommas(loadedtracks), AddCommas(trackAmount), AddCommas(totalnotes));
+        fflush(stdout);
     }
     double end = get_time();
     counttime = end - start;
@@ -596,85 +880,25 @@ int LoadMIDI(const char* filepath)
     int64_t total_entries = 0;
     for (int32_t i = 0; i < trackAmount; i++)
         total_entries += histogram[i].count;
+    activetickcount = count_distinct_ticks(histogram, trackAmount, total_entries);
+    if (activetickcount < 0)
+        activetickcount = merge_timing(histogram, trackAmount, 0);
 
-    updatestatsandprint("concatenating per track timing array\n");
-    ExtendedTickGroup* flat = malloc(total_entries * sizeof(ExtendedTickGroup));
-    int64_t flat_idx = 0;
-    for (int32_t i = 0; i < trackAmount; i++)
-    {
-        for (size_t j = 0; j < histogram[i].count; j++)
-        {
-            flat[flat_idx++] = (ExtendedTickGroup){
-                .tick = histogram[i].data[j].tick,
-                .count = (uint32_t)histogram[i].data[j].event_offset,
-                .notecount = (uint32_t)histogram[i].data[j].notecount,
-                .track = (uint16_t)i,
-                .group_idx = (uint32_t)j
-            };
-        }
-    }
-
-    updatestatsandprint("sorting timing array by tick\n");
-    qsort(flat, total_entries, sizeof(ExtendedTickGroup), cmp_extended_tickgroup);
-
-    activetickcount = 0;
-    if (total_entries > 0)
-    {
-        activetickcount = 1;
-        for (size_t i = 1; i < total_entries; i++)
-        {
-            if (flat[i].tick != flat[i - 1].tick)
-                activetickcount++;
-        }
-    }
-
-    updatestatsandprint("creating main timing array and track RLE\n");
+    updatestatsandprint("merging per track timing into main timing array and track RLE\n");
     timingArr = calloc(activetickcount + 1, sizeof(TickGroup));
     if (trackcolors)
     {
         trackGroups.data = malloc(total_entries * sizeof(TrackGroup));
         trackGroups.count = total_entries;
     }
-    int64_t current_global_offset = 0;
-    int64_t accumulated_notes = 0;
+    merge_timing(histogram, trackAmount, 1);
 
-    if (total_entries > 0)
-    {
-        int64_t out_idx = 0;
-        timingArr[0].tick = flat[0].tick;
-        timingArr[0].event_offset = 0;
-        timingArr[0].notecount = 0;
-
-        for (size_t i = 0; i < total_entries; i++)
-        {
-            ExtendedTickGroup* eg = &flat[i];
-
-            if (i > 0 && eg->tick != timingArr[out_idx].tick)
-            {
-                out_idx++;
-                timingArr[out_idx].tick = eg->tick;
-                timingArr[out_idx].event_offset = current_global_offset;
-                timingArr[out_idx].notecount = accumulated_notes;
-            }
-
-            timingArr[out_idx].notecount += eg->notecount;
-            accumulated_notes += eg->notecount;
-
-            histogram[eg->track].data[eg->group_idx].event_offset = current_global_offset;
-            if (trackcolors)
-            {
-                trackGroups.data[i] = (TrackGroup){
-                    .event_offset = current_global_offset,
-                    .count = eg->count,
-                    .track = (uint8_t)(eg->track << 4)
-                };
-            }
-
-            current_global_offset += eg->count;
-        }
-    }
-    free(flat);
-    flat = NULL;
+    int64_t* startOffsets = malloc((trackAmount + 1) * sizeof(int64_t));
+    #ifdef _OPENMP
+        #pragma omp parallel for
+    #endif
+    for (int32_t i = 0; i < trackAmount; i++)
+        compact_offsets(&histogram[i], &startOffsets[i]);
 
     updatestatsandprint("creating main event array\n");
     eventArr = calloc(eventcount + 1, sizeof(uint24_t));
@@ -684,21 +908,22 @@ int LoadMIDI(const char* filepath)
     start = get_time();
     
     #ifdef _OPENMP
-        #pragma omp parallel for
+        #pragma omp parallel for schedule(dynamic, 1)
     #endif
     for(int32_t i = 0; i < trackAmount; i++)
     {
         trackProperties* currtrack = &tracks.data[i];
         uint8_t* trackstart = filePtr + currtrack->start;
-        ATOMIC_ADD(playednotes, ParseTrackEvents(trackstart, trackstart + currtrack->length, eventArr, &histogram[i], &tempos, &sysexs, (i << 4)));
+        ATOMIC_ADD(playednotes, ParseTrackEvents(trackstart, trackstart + currtrack->length, eventArr, (const int64_t*)histogram[i].data, histogram[i].count, startOffsets[i], &tempos, &sysexs, (i << 4)));
+        TrackTick_arr_free(&histogram[i]); // memory comes back progressively, and in parallel
         ATOMIC_ADD(loadedtracks, 1);
         printf("(%s/%s) tracks parsed, %s notes parsed\r", AddCommas(loadedtracks), AddCommas(trackAmount), AddCommas(playednotes));
+        fflush(stdout);
     }
     end = get_time();    
 
-    for (int32_t i = 0; i < trackAmount; i++)
-        TickGroup_arr_free(&histogram[i]);
     free(histogram);
+    free(startOffsets);
 
     updatestatsandprint("\nfinalizing events and sorting metadata\n");
     timingArr[activetickcount] = (TickGroup){INT64_MAX, (int32_t)totalnotes, (int64_t)eventcount};
