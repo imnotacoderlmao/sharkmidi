@@ -2,6 +2,7 @@
 #include "shaders.h"
 #include "../parse/midistorage.h"
 #include "../parse/parser.h"
+#include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -23,11 +24,11 @@ typedef struct
 
 typedef struct {
     float uMetrics[3];
-    float uGlowEnabled;
-    int uViewStart;
-    int uViewEnd;
-    int uCurrentTick;
-    int uTransparencyEnabled;
+    int32_t uGlowEnabled;
+    int32_t uViewStart;
+    int32_t uViewEnd;
+    int32_t uCurrentTick;
+    int32_t uTransparencyEnabled;
 } FrameUniforms;
 
 #define TOTAL_KEYS (128 * 16 * 16) // key:128 * channel:16 * colorIdx:16
@@ -35,7 +36,6 @@ typedef struct {
 
 static GLuint quadShader, cursorShader, frameUBO;
 static GLint uc_cursorX, uc_halfWidth, uc_yBottom, uc_yTop, uc_lineColor;
-static GLint u_metrics, u_viewStart, u_viewEnd, u_palette, u_glowEnabled, u_transparencyEnabled, u_currentTick;
 static GLuint vao, cursorVAO, vboBuffer, paletteTex;
 
 static RenderNote* ring;
@@ -178,14 +178,11 @@ void Renderer_Init(void)
     cursorShader = build_shader(CursorVertSrc, CursorFragSrc);
     glGenVertexArrays(1, &cursorVAO); 
 
-    // Setup Uniform Buffer Object (UBO) for zero driver-overhead uniform updates
     glGenBuffers(1, &frameUBO);
     glBindBuffer(GL_UNIFORM_BUFFER, frameUBO);
     glBufferData(GL_UNIFORM_BUFFER, sizeof(FrameUniforms), NULL, GL_DYNAMIC_DRAW);
+    glBindBufferBase(GL_UNIFORM_BUFFER, 0, frameUBO);
     glBindBuffer(GL_UNIFORM_BUFFER, 0);
-
-    GLuint blockIndex = glGetUniformBlockIndex(quadShader, "FrameData");
-    glUniformBlockBinding(quadShader, blockIndex, 0);
 
     uc_cursorX   = glGetUniformLocation(cursorShader, "uCursorX");
     uc_halfWidth = glGetUniformLocation(cursorShader, "uHalfWidthNDC");
@@ -247,6 +244,7 @@ void Renderer_Dispose(void)
         vboBuffer = 0;
         ring = NULL;
     }
+    if (frameUBO != 0) { glDeleteBuffers(1, &frameUBO); frameUBO = 0; }
     if (paletteTex != 0) { glDeleteTextures(1, &paletteTex); paletteTex = 0; }
     if (vao != 0) { glDeleteVertexArrays(1, &vao); vao = 0; }
     if (quadShader != 0) { glDeleteProgram(quadShader); quadShader = 0; }
@@ -504,7 +502,6 @@ static void draw_notes(int viewStart, int viewEnd, int32_t tick, float yBottom, 
 
     glBindBuffer(GL_UNIFORM_BUFFER, frameUBO);
     glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(FrameUniforms), &uniforms);
-    glBindBufferBase(GL_UNIFORM_BUFFER, 0, frameUBO);
 
     glUseProgram(quadShader);
     glActiveTexture(GL_TEXTURE0);

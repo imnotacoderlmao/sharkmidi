@@ -1,15 +1,22 @@
 #ifndef SHADERS_H
 #define SHADERS_H
 
+#define FRAME_BLOCK \
+"layout(std140, binding = 0) uniform FrameData {\n" \
+"    vec3 uMetrics;\n" \
+"    int uGlowEnabled;\n" \
+"    int uViewStart;\n" \
+"    int uViewEnd;\n" \
+"    int uCurrentTick;\n" \
+"    int uTransparencyEnabled;\n" \
+"};\n"
+
 static const char* QuadVertSrc =
 "#version 420 core\n"
 "in int aStartTick;\n"
 "in int aEndTick;\n"
 "in uint aPackedData;\n"
-"uniform vec3 uMetrics;\n"
-"uniform int uViewStart;\n"
-"uniform int uViewEnd;\n"
-"uniform int uCurrentTick;\n"
+FRAME_BLOCK
 "uniform sampler1D uPalette;\n"
 "flat out vec4 vColor;\n"
 "flat out int vIsActive;\n"
@@ -31,8 +38,7 @@ static const char* QuadFragSrc =
 "flat in vec4 vColor;\n"
 "flat in int vIsActive;\n"
 "flat in float opacity;\n"
-"uniform int uGlowEnabled;\n"
-"uniform int uTransparencyEnabled;\n"
+FRAME_BLOCK
 "out vec4 fragColor;\n"
 "void main() {\n"
 "    float note_opacity = (uTransparencyEnabled == 1) ? opacity : 1.0;\n"
