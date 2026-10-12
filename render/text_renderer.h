@@ -2,5 +2,6 @@
 #define text_renderer_hdr
 void Text_Init(void);
 void Text_Dispose(void);
-void Text_Draw(int screenWidth, int screenHeight, float x, float y, float scale, float r, float g, float b, const char* fmt, ...);
+void Text_Queue(float x, float y, float scale, float r, float g, float b, const char* fmt, ...);
+void Text_Flush(int screenHeight, int screenWidth);
 #endif

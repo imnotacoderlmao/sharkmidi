@@ -54,17 +54,17 @@ static void resync_tempo_cursor(void)
 
 double clock_getTick(void)
 {
-    int64_t skip = atomic_exchange(&pending_skip, 0);
-    if (skip)
+    if (pending_skip)
     {
-        tick = MAX(0.0, tick + (double)skip);
+        tick = MAX(0.0, tick + (double)pending_skip);
         resync_tempo_cursor();
+        pending_skip = 0;
     }
-    if (paused) { os_sleep_ms(1); return tick; }
     now = get_time();
-    double remaining = MIN(now - last, onesixtyh);
     delta = now - last;
     last = now;
+    if (paused) { os_sleep_ms(1); return tick; }
+    double remaining = MIN(delta, onesixtyh);
     // for tick to not jump too much when you have microsecond tempo changes or something
     while (remaining > 0.0)
     {
@@ -220,6 +220,7 @@ void StartPlayback(int singlethread)
     while(!stopping)
     {
         int64_t clock = (int64_t)clock_getTick();
+        if (clock == current_clock) continue;
         if (clock < current_clock)
         {
             while (timing > timingArr && timing->tick > clock)

@@ -1,7 +1,7 @@
 #ifndef SHADERS_H
 #define SHADERS_H
 
-static const char* LineVertSrc =
+static const char* QuadVertSrc =
 "#version 420 core\n"
 "in int aStartTick;\n"
 "in int aEndTick;\n"
@@ -26,7 +26,7 @@ static const char* LineVertSrc =
 "    gl_Position = vec4(x, y, 0, 1.0);\n"
 "}\n";
 
-static const char* LineFragSrc =
+static const char* QuadFragSrc =
 "#version 420 core\n"
 "flat in vec4 vColor;\n"
 "flat in int vIsActive;\n"

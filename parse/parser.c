@@ -588,7 +588,6 @@ int LoadMIDI(const char* filepath)
         ATOMIC_ADD(eventcount, CountTrackEvents(trackstart, trackstart + currtrack->length, &histogram[i]));
         ATOMIC_ADD(loadedtracks, 1);
         printf("(%s/%s) tracks scanned, %s notes counted\r", AddCommas(loadedtracks), AddCommas(trackAmount), AddCommas(totalnotes));
-        fflush(stdout);
     }
     double end = get_time();
     counttime = end - start;
@@ -694,7 +693,6 @@ int LoadMIDI(const char* filepath)
         ATOMIC_ADD(playednotes, ParseTrackEvents(trackstart, trackstart + currtrack->length, eventArr, &histogram[i], &tempos, &sysexs, (i << 4)));
         ATOMIC_ADD(loadedtracks, 1);
         printf("(%s/%s) tracks parsed, %s notes parsed\r", AddCommas(loadedtracks), AddCommas(trackAmount), AddCommas(playednotes));
-        fflush(stdout);
     }
     end = get_time();    
 

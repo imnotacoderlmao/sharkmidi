@@ -336,12 +336,12 @@ void Window_Run(const char* filepath)
         
         UpdatePlaybackStats();
                  
-        Text_Draw(fbWidth, fbHeight, 5, 4, 1.75f, 0.0f, 1.0f, 0.0f,
+        Text_Queue(5, 4, 1.75f, 0.0f, 1.0f, 0.0f,
             "tick: %s | zoom: %d %s | QoS: %s | bpm: %.2f | fps: %s",
             AddCommas(current_clock), stationarynotes? (int)scrollfactor : WindowTicks, stationarynotes? "bars" : "ticks", AddCommas(NotesDrawnLastFrame), bpm, AddCommas(smoothed_fps));
-        
-        Text_Draw(fbWidth, fbHeight, 5, fbHeight - 16, 1.75f, 0.0f, 0.7f, 1.0f,
+        Text_Queue(5, fbHeight - 16, 1.75f, 0.0f, 0.7f, 1.0f,
             "%s | notes: %s / %s (%s/s)", scrollfilenameifover32characters(filename), AddCommas(playednotes), AddCommas(totalnotes), AddCommas(notespersec));
+        Text_Flush(fbWidth, fbHeight);
 
         glfwSwapBuffers(win);
         glfwPollEvents();

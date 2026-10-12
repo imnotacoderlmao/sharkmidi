@@ -1,5 +1,5 @@
 CC ?= gcc
-CFLAGS = -O3 -fstrict-overflow -fno-math-errno -fno-stack-protector
+CFLAGS = -O3 -fstrict-overflow -fno-math-errno -fno-stack-protector -ffunction-sections -fdata-sections -s
 # libmath now linked due to exp()
 LDFLAGS = -pthread -lm
 
@@ -57,4 +57,4 @@ build/%.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
 clean:
-	rm -rf build/
+	rm -rf build/*.o build/parse build/playback build/synth build/render build/third_party

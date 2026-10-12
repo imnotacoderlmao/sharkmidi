@@ -21,10 +21,19 @@ typedef struct
     uint32_t PackedData; // colorIdx:8 << 16 | key:8 << 8 | velocity:8
 } RenderNote;
 
+typedef struct {
+    float uMetrics[3];
+    float uGlowEnabled;
+    int uViewStart;
+    int uViewEnd;
+    int uCurrentTick;
+    int uTransparencyEnabled;
+} FrameUniforms;
+
 #define TOTAL_KEYS (128 * 16 * 16) // key:128 * channel:16 * colorIdx:16
 #define MAX_WINDOW_TICKS (1 << 27) // keeps viewStart + WindowTicks inside int range
 
-static GLuint lineShader, cursorShader;
+static GLuint quadShader, cursorShader, frameUBO;
 static GLint uc_cursorX, uc_halfWidth, uc_yBottom, uc_yTop, uc_lineColor;
 static GLint u_metrics, u_viewStart, u_viewEnd, u_palette, u_glowEnabled, u_transparencyEnabled, u_currentTick;
 static GLuint vao, cursorVAO, vboBuffer, paletteTex;
@@ -165,25 +174,27 @@ void Renderer_Init(void)
 {
     if (isInitialized) return;
 
-    lineShader = build_shader(LineVertSrc, LineFragSrc);
-    u_metrics = glGetUniformLocation(lineShader, "uMetrics");
-    u_viewStart = glGetUniformLocation(lineShader, "uViewStart");
-    u_viewEnd = glGetUniformLocation(lineShader, "uViewEnd");
-    u_palette = glGetUniformLocation(lineShader, "uPalette");
-    u_glowEnabled = glGetUniformLocation(lineShader, "uGlowEnabled");
-    u_transparencyEnabled = glGetUniformLocation(lineShader, "uTransparencyEnabled");
-    u_currentTick = glGetUniformLocation(lineShader, "uCurrentTick");
-
+    quadShader = build_shader(QuadVertSrc, QuadFragSrc);
     cursorShader = build_shader(CursorVertSrc, CursorFragSrc);
-    uc_cursorX  = glGetUniformLocation(cursorShader, "uCursorX");
-    uc_halfWidth = glGetUniformLocation(cursorShader, "uHalfWidthNDC");
-    uc_yBottom  = glGetUniformLocation(cursorShader, "uYBottom");
-    uc_yTop     = glGetUniformLocation(cursorShader, "uYTop");
-    uc_lineColor = glGetUniformLocation(cursorShader, "uLineColor");
     glGenVertexArrays(1, &cursorVAO); 
 
-    glUseProgram(lineShader);
-    glUniform1i(u_palette, 0);
+    // Setup Uniform Buffer Object (UBO) for zero driver-overhead uniform updates
+    glGenBuffers(1, &frameUBO);
+    glBindBuffer(GL_UNIFORM_BUFFER, frameUBO);
+    glBufferData(GL_UNIFORM_BUFFER, sizeof(FrameUniforms), NULL, GL_DYNAMIC_DRAW);
+    glBindBuffer(GL_UNIFORM_BUFFER, 0);
+
+    GLuint blockIndex = glGetUniformBlockIndex(quadShader, "FrameData");
+    glUniformBlockBinding(quadShader, blockIndex, 0);
+
+    uc_cursorX   = glGetUniformLocation(cursorShader, "uCursorX");
+    uc_halfWidth = glGetUniformLocation(cursorShader, "uHalfWidthNDC");
+    uc_yBottom   = glGetUniformLocation(cursorShader, "uYBottom");
+    uc_yTop      = glGetUniformLocation(cursorShader, "uYTop");
+    uc_lineColor = glGetUniformLocation(cursorShader, "uLineColor");
+
+    glUseProgram(quadShader);
+    glUniform1i(glGetUniformLocation(quadShader, "uPalette"), 0);
     glUseProgram(0);
 
     khdr_absid = calloc(TOTAL_KEYS, sizeof(int32_t));
@@ -192,7 +203,7 @@ void Renderer_Init(void)
     glGenVertexArrays(1, &vao);
     glGenTextures(1, &paletteTex);
 
-    resize_ring(ringCapacity); // head == tail here, so nothing gets copied
+    resize_ring(ringCapacity);
     isInitialized = 1;
 }
 
@@ -238,7 +249,7 @@ void Renderer_Dispose(void)
     }
     if (paletteTex != 0) { glDeleteTextures(1, &paletteTex); paletteTex = 0; }
     if (vao != 0) { glDeleteVertexArrays(1, &vao); vao = 0; }
-    if (lineShader != 0) { glDeleteProgram(lineShader); lineShader = 0; }
+    if (quadShader != 0) { glDeleteProgram(quadShader); quadShader = 0; }
     glDeleteVertexArrays(1, &cursorVAO);
     glDeleteProgram(cursorShader);
 }
@@ -479,17 +490,23 @@ static void upload_palette(void)
     paletteUploadPending = 0;
 }
 
-static void draw_notes(int viewStart, int viewEnd, int32_t tick, float yBottom, float yTop)
+static void draw_notes(int viewStart, int viewEnd, int32_t tick, float yBottom, float yTop, float pixelsPerTick)
 {
     float yStep = (yTop - yBottom) / 128.0f;
-    glUseProgram(lineShader);
-    glUniform3f(u_metrics, pixelsPerTick, yBottom, yStep);
-    glUniform1i(u_viewStart, viewStart);
-    glUniform1i(u_viewEnd, viewEnd);
-    glUniform1i(u_glowEnabled, EnableGlow);
-    glUniform1i(u_transparencyEnabled, EnableTransparency);
-    glUniform1i(u_currentTick, tick);
+    FrameUniforms uniforms = {
+        .uMetrics = { pixelsPerTick, yBottom, yStep },
+        .uGlowEnabled = (float)EnableGlow,
+        .uViewStart = viewStart,
+        .uViewEnd = viewEnd,
+        .uCurrentTick = tick,
+        .uTransparencyEnabled = EnableTransparency
+    };
 
+    glBindBuffer(GL_UNIFORM_BUFFER, frameUBO);
+    glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(FrameUniforms), &uniforms);
+    glBindBufferBase(GL_UNIFORM_BUFFER, 0, frameUBO);
+
+    glUseProgram(quadShader);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_1D, paletteTex);
     glBindVertexArray(vao);
@@ -580,6 +597,6 @@ void Renderer_Render(int screenWidth, int screenHeight, int32_t tick, int pad)
     float yTop = 1.0f - 2.0f * pad / screenHeight;
 
     if (NotesDrawnLastFrame > 0)
-        draw_notes(viewStart, viewEnd, tick, yBottom, yTop);
+        draw_notes(viewStart, viewEnd, tick, yBottom, yTop, pixelsPerTick);
     draw_cursor((float)(tick - viewStart) * pixelsPerTick - 1.0f, screenWidth, yBottom, yTop);
 }
