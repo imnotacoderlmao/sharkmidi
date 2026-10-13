@@ -268,6 +268,14 @@ static void tg_grow(TrackTick_arr* a)
     a->data = realloc(a->data, a->cap * sizeof(TrackTick));
 }
 
+// HOW THE FAST PATH WORKS
+// the common case in a big MIDI is a channel event with a 1 or 2 byte delta, with or without a status byte.
+// CountTrackEvents and ParseTrackEvents each run a tight loop for exactly that and nothing else. before it
+// changes any state it peeks at the next event; if that is anything unusual (3+ byte delta, meta, sysex,
+// less than 8 bytes left in the track) it leaves the loop and the original, fully general code handles that
+// one event, then the fast loop resumes. so rare cases keep their old behaviour, and the fast loop never has
+// to know about them. the two fast loops must stay in lockstep (same events, same group boundaries)
+
 // peeks at the next event and says whether it is a plain channel event with a 1 or 2 byte delta,
 // which is what the fast loops handle. nothing is consumed or modified
 static inline __attribute__((always_inline))
@@ -316,8 +324,9 @@ int64_t CountTrackEvents(uint8_t* trackPtr, uint8_t* trackEnd, TrackTick_arr* ti
             count &= keep;
             notecount &= keep;
             absolutetime += delta;
+
             uint32_t st = ev;
-            if (ev >= 0x80) { prevEvent = ev; q++; }
+            if (ev >= 0x80) { prevEvent = ev; q++; } // new status byte, otherwise running status
             else st = prevEvent;
             count++;
             // program change / channel pressure have one data byte. the length stays a predicted branch so the
@@ -419,7 +428,8 @@ int64_t CountTrackEvents(uint8_t* trackPtr, uint8_t* trackEnd, TrackTick_arr* ti
 }
 
 // decodes one channel event (q points at its status or, with running status, its first data byte),
-// stores it and returns the pointer past it. branchless apart from the status byte check
+// stores it and returns the pointer past it. only the status byte check and the rare one-data-byte case are
+// branches, the note-on / vel-0 handling is plain arithmetic
 static inline __attribute__((always_inline))
 const uint8_t* decode_store(const uint8_t* q, uint32_t ev, uint8_t* prevEvent, uint24_t* dst, int64_t* notecount)
 {
@@ -643,7 +653,120 @@ int64_t ParseTrackEvents(uint8_t* trackPtr, uint8_t* trackEnd, uint24_t* msgPtr,
 }
 
 double counttime = 0.0;
+double mergetime = 0.0;
+double loadtime = 0.0;
 double parsetime = 0.0;
+// ---- big array allocation ------------------------------------------------------------------------------------
+// eventArr, timingArr and the track index are hundreds of MB up to several GB of brand new memory. the kernel has
+// to zero every 4K page and take a page fault on first touch, which is a large share of the parse (and merge) time
+// on big files. the environment variable SHARKMIDI_PAGES (Linux only, ignored elsewhere) chooses what to do:
+//   unset      plain calloc
+//   huge       2MB aligned + MADV_HUGEPAGE: one fault per 2MB instead of 512 (needs transparent hugepages set to
+//              "madvise" or "always" in /sys/kernel/mm/transparent_hugepage/enabled)
+//   prefault   fault the whole array in up front, in parallel, so the parse threads don't fault page by page
+//   both       both of the above
+#if defined(__linux__)
+#ifndef MADV_HUGEPAGE
+#define MADV_HUGEPAGE 14
+#endif
+#ifndef MADV_POPULATE_WRITE
+#define MADV_POPULATE_WRITE 23 // Linux 5.14+, older kernels fall back to touching the pages
+#endif
+#define BIG_HUGE 1
+#define BIG_PREFAULT 2
+#define BIG_MIN_BYTES (4u << 20)
+#define BIG_HUGE_ALIGN ((size_t)2 << 20)
+#define BIG_MAX_BLOCKS 16
+static struct { void* base; size_t size; } bigblocks[BIG_MAX_BLOCKS];
+static int bigmode = -1;
+
+static void big_mode_init(void)
+{
+    const char* e = getenv("SHARKMIDI_PAGES");
+    bigmode = 0;
+    if (e)
+    {
+        if (!strcmp(e, "huge")) bigmode = BIG_HUGE;
+        else if (!strcmp(e, "prefault")) bigmode = BIG_PREFAULT;
+        else if (!strcmp(e, "both")) bigmode = BIG_HUGE | BIG_PREFAULT;
+        else if (strcmp(e, "default") && *e) fprintf(stderr, "SHARKMIDI_PAGES: unknown value '%s' (huge, prefault, both)\n", e);
+    }
+}
+
+static void big_prefault(char* p, size_t size)
+{
+    const size_t chunk = (size_t)8 << 20;
+    int64_t chunks = (int64_t)((size + chunk - 1) / chunk);
+    #ifdef _OPENMP
+        #pragma omp parallel for schedule(static)
+    #endif
+    for (int64_t c = 0; c < chunks; c++)
+    {
+        char* a = p + (size_t)c * chunk;
+        size_t len = (size_t)c * chunk + chunk <= size ? chunk : size - (size_t)c * chunk;
+        if (madvise(a, len, MADV_POPULATE_WRITE) != 0)
+            for (size_t o = 0; o < len; o += 4096)
+                *(volatile char*)(a + o) = 0; // writing zero keeps the page zero
+    }
+}
+
+// zeroed memory like calloc(1, bytes)
+static void* big_alloc(size_t bytes)
+{
+    if (bigmode < 0) big_mode_init();
+    if (!bigmode || bytes < BIG_MIN_BYTES) return calloc(1, bytes);
+    size_t size = (bytes + BIG_HUGE_ALIGN - 1) & ~(BIG_HUGE_ALIGN - 1);
+    int slot = -1;
+    for (int i = 0; i < BIG_MAX_BLOCKS && slot < 0; i++)
+        if (!bigblocks[i].base) slot = i;
+    if (slot < 0) return calloc(1, bytes);
+    char* raw = mmap(NULL, size + BIG_HUGE_ALIGN, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (raw == MAP_FAILED) return calloc(1, bytes);
+    char* p = (char*)(((uintptr_t)raw + BIG_HUGE_ALIGN - 1) & ~(uintptr_t)(BIG_HUGE_ALIGN - 1));
+    if (p > raw) munmap(raw, (size_t)(p - raw));                                  // give back the alignment slack
+    size_t tail = (size_t)((raw + size + BIG_HUGE_ALIGN) - (p + size));
+    if (tail) munmap(p + size, tail);
+    if (bigmode & BIG_HUGE) madvise(p, size, MADV_HUGEPAGE);
+    if (bigmode & BIG_PREFAULT) big_prefault(p, size);
+    bigblocks[slot].base = p;
+    bigblocks[slot].size = size;
+    return p;
+}
+
+static void big_free(void* p)
+{
+    if (!p) return;
+    for (int i = 0; i < BIG_MAX_BLOCKS; i++)
+        if (bigblocks[i].base == p)
+        {
+            munmap(p, bigblocks[i].size);
+            bigblocks[i].base = NULL;
+            return;
+        }
+    free(p);
+}
+
+// for the statistics: which mode is active and how much of the process really is on huge pages
+static const char* big_mode_report(void)
+{
+    static char text[96];
+    long kb = -1;
+    FILE* f = fopen("/proc/self/smaps_rollup", "r");
+    char line[128];
+    while (f && fgets(line, sizeof(line), f))
+        if (sscanf(line, "AnonHugePages: %ld kB", &kb) == 1) break;
+    if (f) fclose(f);
+    // also in default mode: with transparent hugepages set to "always" the kernel already uses them for these arrays
+    snprintf(text, sizeof(text), "%s%s%s, %s MB on huge pages", bigmode ? "" : "default (calloc)", (bigmode & BIG_HUGE) ? "huge" : "",
+        (bigmode & BIG_PREFAULT) ? (bigmode & BIG_HUGE ? "+prefault" : "prefault") : "", kb < 0 ? "?" : AddCommas(kb / 1024));
+    return text;
+}
+#else
+#define big_alloc(bytes) calloc(1, (bytes))
+#define big_free(p) free(p)
+static const char* big_mode_report(void) { return "default (calloc)"; }
+#endif
+
 void printparsestatistics(void)
 {
     char parsestatistics[] =
@@ -652,7 +775,9 @@ void printparsestatistics(void)
     "   Filesize:               %s Bytes\n"
     "   Took:\n"
     "       Count:              %lfs (%s notes/s)\n"
+    "       Merge:              %lfs\n"
     "       Parse:              %lfs (%s notes/s)\n"
+    "       Total:              %lfs\n"
     "   Properties:\n"
     "       PPQ / Ticks:        %s / %s (%s has events)\n"
     "       Tracks:             %s\n"
@@ -665,16 +790,18 @@ void printparsestatistics(void)
     "       Events:             %s Bytes (3 bytes/event)\n"
     "       Track Index (RLE):  %s Bytes (%s groups)\n"
     "       Total:              %s Bytes\n"
+    "       Page mode:          %s\n"
     "===============================================\n";
 
     uint64_t trackRLEBytes = (trackcolors? trackGroups.count : 0) * sizeof(TrackGroup);
     printf(parsestatistics, filename, 
-        AddCommas(fileLen), counttime, AddCommas((totalnotes / counttime)), parsetime, 
-        AddCommas((totalnotes / parsetime)), AddCommas(ppq), AddCommas(maxTick), AddCommas(activetickcount), AddCommas(trackAmount),
+        AddCommas(fileLen), counttime, AddCommas((totalnotes / counttime)), mergetime, parsetime, 
+        AddCommas((totalnotes / parsetime)), loadtime, AddCommas(ppq), AddCommas(maxTick), AddCommas(activetickcount), AddCommas(trackAmount),
         AddCommas(eventcount), AddCommas(totalnotes), AddCommas(tempoCount - 1), AddCommas(sysexCount - 1),
         AddCommas(activetickcount * sizeof(TickGroup)), AddCommas(eventcount * sizeof(uint24_t)),
         AddCommas(trackRLEBytes), AddCommas(trackGroups.count),
-        AddCommas((activetickcount * sizeof(TickGroup)) + (eventcount * sizeof(uint24_t)) + trackRLEBytes));
+        AddCommas((activetickcount * sizeof(TickGroup)) + (eventcount * sizeof(uint24_t)) + trackRLEBytes),
+        big_mode_report());
 }
 
 TempoEvent_arr tempos = {0};
@@ -776,9 +903,11 @@ static int64_t merge_timing(TrackTick_arr* hist, int32_t tracks, int fill)
 
 // distinct tick count without a merge pass: a single track's ticks are strictly increasing, otherwise mark
 // every group's tick in a bitmap and popcount it. returns -1 when the bitmap would be big next to the
-// groups themselves (very sparse, very long files), the caller then counts with the merge instead
-static int64_t count_distinct_ticks(TrackTick_arr* hist, int32_t tracks, int64_t total_entries)
+// groups themselves (very sparse, very long files), the caller then counts with the merge instead.
+// the bitmap is handed back through bitsOut (NULL if there is none) because the rank merge needs it
+static int64_t count_distinct_ticks(TrackTick_arr* hist, int32_t tracks, int64_t total_entries, uint64_t** bitsOut)
 {
+    *bitsOut = NULL;
     int32_t used = 0, only = 0;
     for (int32_t t = 0; t < tracks; t++)
         if (hist[t].count > 0) { used++; only = t; }
@@ -790,19 +919,167 @@ static int64_t count_distinct_ticks(TrackTick_arr* hist, int32_t tracks, int64_t
     uint64_t* bits = calloc(words, sizeof(uint64_t));
     if (!bits) return -1;
     #ifdef _OPENMP
-        #pragma omp parallel for
+        #pragma omp parallel for schedule(dynamic, 1)
     #endif
     for (int32_t t = 0; t < tracks; t++)
         for (int64_t j = 0; j < hist[t].count; j++)
         {
             int64_t tick = hist[t].data[j].tick;
-            __atomic_fetch_or(&bits[tick >> 6], 1ull << (tick & 63), __ATOMIC_RELAXED);
+            uint64_t mask = 1ull << (tick & 63);
+            // most ticks are already marked by another track, a plain read keeps the cache line shared
+            if (!(__atomic_load_n(&bits[tick >> 6], __ATOMIC_RELAXED) & mask))
+                __atomic_fetch_or(&bits[tick >> 6], mask, __ATOMIC_RELAXED);
         }
     int64_t distinct = 0;
     for (int64_t w = 0; w < words; w++)
         distinct += __builtin_popcountll(bits[w]);
-    free(bits);
+    *bitsOut = bits;
     return distinct;
+}
+
+// ---- merge by counting sort ---------------------------------------------------------------------------------
+// the heap merge is serial, and with hundreds of tracks every group costs log2(tracks) compares plus a cache miss.
+// the tick bitmap gives each tick a dense rank in O(1) (popcount of the bits before it), which turns the merge into
+// a counting sort: count what lands on each tick, prefix sum, place every group. the ticks are cut into ranges
+// and every range belongs to one thread, so there are no atomics, and the result is exactly what the heap merge
+// produces: ticks in order, groups of one tick ordered by track
+#ifndef MERGE_RANK_MIN_TRACKS
+#define MERGE_RANK_MIN_TRACKS 8 // below this the heap is shallow and about as fast (measured: break-even at 4, rank wins from 8)
+#endif
+#define RANK_CHUNKS 64
+
+static inline int64_t tick_rank(const uint64_t* bits, const uint32_t* wprefix, int64_t tick)
+{
+    return wprefix[tick >> 6] + __builtin_popcountll(bits[tick >> 6] & ((1ull << (tick & 63)) - 1));
+}
+
+// the tick that has the given rank (r < number of distinct ticks)
+static int64_t tick_of_rank(const uint64_t* bits, const uint32_t* wprefix, int64_t words, int64_t r)
+{
+    int64_t lo = 0, hi = words - 1;
+    while (lo < hi)
+    {
+        int64_t mid = lo + (hi - lo + 1) / 2;
+        if (wprefix[mid] <= r) lo = mid; else hi = mid - 1;
+    }
+    uint64_t x = bits[lo];
+    for (int64_t k = r - wprefix[lo]; k > 0; k--)
+        x &= x - 1; // drop the lowest set bit
+    return (lo << 6) + __builtin_ctzll(x);
+}
+
+// returns 0 if it could not run (memory, too many ticks for 32 bit ranks), then nothing was modified
+// except timingArr/trackGroups contents, which the heap merge overwrites completely
+static int merge_by_rank(TrackTick_arr* hist, int32_t tracks, const uint64_t* bits, int64_t distinct)
+{
+    int64_t words = (maxTick >> 6) + 1;
+    if (distinct <= 0 || distinct >= UINT32_MAX) return 0;
+    int chunks = distinct >= 4096 ? RANK_CHUNKS : 1;
+    uint32_t* wprefix = malloc((words + 1) * sizeof(uint32_t));
+    uint32_t* evcur = calloc(distinct, sizeof(uint32_t));                  // events already placed on each tick
+    uint32_t* ecur = trackcolors ? calloc(distinct, sizeof(uint32_t)) : NULL; // next group index on each tick
+    int64_t* tickbound = malloc((chunks + 1) * sizeof(int64_t));
+    int64_t* bnd = malloc((size_t)tracks * (chunks + 1) * sizeof(int64_t));
+    if (!wprefix || !evcur || (trackcolors && !ecur) || !tickbound || !bnd)
+    {
+        free(wprefix); free(evcur); free(ecur); free(tickbound); free(bnd);
+        return 0;
+    }
+    uint32_t run = 0;
+    for (int64_t w = 0; w < words; w++)
+    {
+        wprefix[w] = run;
+        run += (uint32_t)__builtin_popcountll(bits[w]);
+    }
+
+    // ranges holding about the same number of distinct ticks
+    tickbound[0] = 0;
+    tickbound[chunks] = maxTick + 1;
+    for (int c = 1; c < chunks; c++)
+        tickbound[c] = tick_of_rank(bits, wprefix, words, distinct * c / chunks);
+
+    // where every track's groups cross those tick bounds
+    #ifdef _OPENMP
+        #pragma omp parallel for schedule(dynamic, 1)
+    #endif
+    for (int32_t t = 0; t < tracks; t++)
+    {
+        const TrackTick* d = hist[t].data;
+        int64_t n = hist[t].count, lo = 0;
+        int64_t* b = &bnd[(size_t)t * (chunks + 1)];
+        b[0] = 0;
+        for (int c = 1; c < chunks; c++)
+        {
+            int64_t hi = n;
+            while (lo < hi)
+            {
+                int64_t mid = lo + (hi - lo) / 2;
+                if (d[mid].tick < tickbound[c]) lo = mid + 1; else hi = mid;
+            }
+            b[c] = lo;
+        }
+        b[chunks] = n;
+    }
+
+    // pass 1: what lands on each tick (events, notes and, for the track index, groups)
+    #ifdef _OPENMP
+        #pragma omp parallel for schedule(dynamic, 1)
+    #endif
+    for (int c = 0; c < chunks; c++)
+        for (int32_t t = 0; t < tracks; t++)
+        {
+            const TrackTick* d = hist[t].data;
+            const int64_t* b = &bnd[(size_t)t * (chunks + 1)];
+            for (int64_t j = b[c]; j < b[c + 1]; j++)
+            {
+                int64_t r = tick_rank(bits, wprefix, d[j].tick);
+                timingArr[r].tick = d[j].tick;
+                timingArr[r].event_offset += d[j].count; // totals for now, turned into start offsets below
+                timingArr[r].notecount += d[j].notecount;
+                if (ecur) ecur[r]++;
+            }
+        }
+
+    // prefix sums: start offset of each tick in eventArr, notes up to and including it, first group index on it
+    int64_t events = 0, notes = 0;
+    uint32_t groups = 0;
+    for (int64_t r = 0; r < distinct; r++)
+    {
+        int64_t tickevents = timingArr[r].event_offset;
+        notes += timingArr[r].notecount;
+        timingArr[r].event_offset = events;
+        timingArr[r].notecount = notes;
+        events += tickevents;
+        if (ecur)
+        {
+            uint32_t tickgroups = ecur[r];
+            ecur[r] = groups;
+            groups += tickgroups;
+        }
+    }
+
+    // pass 2: place every group. tracks are visited in order, so groups of one tick end up ordered by track
+    #ifdef _OPENMP
+        #pragma omp parallel for schedule(dynamic, 1)
+    #endif
+    for (int c = 0; c < chunks; c++)
+        for (int32_t t = 0; t < tracks; t++)
+        {
+            TrackTick* d = hist[t].data;
+            const int64_t* b = &bnd[(size_t)t * (chunks + 1)];
+            for (int64_t j = b[c]; j < b[c + 1]; j++)
+            {
+                int64_t r = tick_rank(bits, wprefix, d[j].tick);
+                int64_t offset = timingArr[r].event_offset + evcur[r];
+                evcur[r] += d[j].count;
+                if (ecur)
+                    trackGroups.data[ecur[r]++] = (TrackGroup){.event_offset = offset, .count = d[j].count, .track = (uint8_t)(t << 4)};
+                d[j].offset = offset; // the track parser reads its write position from here
+            }
+        }
+
+    free(wprefix); free(evcur); free(ecur); free(tickbound); free(bnd);
+    return 1;
 }
 
 // parsing needs each group's start offset in eventArr, so squeeze the 16 byte groups down to 8 byte offsets in
@@ -838,6 +1115,7 @@ static void compact_offsets(TrackTick_arr* a, int64_t* start)
 
 int LoadMIDI(const char* filepath)
 {
+    double loadstart = get_time();
     UnloadMIDI();
     trackAmount = 0, totalnotes = 0, eventcount = 0, playednotes = 0, maxTick = 0;
     updatestatsandprint("initiating memory mapped file\n");
@@ -861,7 +1139,7 @@ int LoadMIDI(const char* filepath)
     int32_t loadedtracks = 0;
     
     #ifdef _OPENMP
-        #pragma omp parallel for schedule(dynamic, 1)
+        #pragma omp parallel for
     #endif
     for(int32_t i = 0; i < trackAmount; i++)
     {
@@ -880,18 +1158,32 @@ int LoadMIDI(const char* filepath)
     int64_t total_entries = 0;
     for (int32_t i = 0; i < trackAmount; i++)
         total_entries += histogram[i].count;
-    activetickcount = count_distinct_ticks(histogram, trackAmount, total_entries);
+    double mergestart = get_time();
+    uint64_t* tickbits = NULL;
+    activetickcount = count_distinct_ticks(histogram, trackAmount, total_entries, &tickbits);
     if (activetickcount < 0)
         activetickcount = merge_timing(histogram, trackAmount, 0);
+    int32_t usedtracks = 0;
+    for (int32_t i = 0; i < trackAmount; i++)
+        usedtracks += histogram[i].count > 0;
 
     updatestatsandprint("merging per track timing into main timing array and track RLE\n");
-    timingArr = calloc(activetickcount + 1, sizeof(TickGroup));
+    timingArr = big_alloc((activetickcount + 1) * sizeof(TickGroup));
     if (trackcolors)
     {
-        trackGroups.data = malloc(total_entries * sizeof(TrackGroup));
+        trackGroups.data = big_alloc(total_entries * sizeof(TrackGroup));
         trackGroups.count = total_entries;
     }
-    merge_timing(histogram, trackAmount, 1);
+    int merged = 0;
+    #ifndef MERGE_RANK_FORCE
+        #define MERGE_RANK_FORCE 0
+    #endif
+    // the rank merge needs 4 (8 with track colors) bytes per distinct tick on top, only worth it when ticks are shared
+    if (tickbits && usedtracks >= MERGE_RANK_MIN_TRACKS && (MERGE_RANK_FORCE || activetickcount * 8 <= total_entries * 4))
+        merged = merge_by_rank(histogram, trackAmount, tickbits, activetickcount);
+    if (!merged)
+        merge_timing(histogram, trackAmount, 1);
+    free(tickbits);
 
     int64_t* startOffsets = malloc((trackAmount + 1) * sizeof(int64_t));
     #ifdef _OPENMP
@@ -900,15 +1192,16 @@ int LoadMIDI(const char* filepath)
     for (int32_t i = 0; i < trackAmount; i++)
         compact_offsets(&histogram[i], &startOffsets[i]);
 
+    mergetime = get_time() - mergestart;
     updatestatsandprint("creating main event array\n");
-    eventArr = calloc(eventcount + 1, sizeof(uint24_t));
+    eventArr = big_alloc((eventcount + 1) * sizeof(uint24_t));
 
     loadedtracks = 0;
     updatestatsandprint("actually parsing events this time\n");
     start = get_time();
     
     #ifdef _OPENMP
-        #pragma omp parallel for schedule(dynamic, 1)
+        #pragma omp parallel for
     #endif
     for(int32_t i = 0; i < trackAmount; i++)
     {
@@ -944,6 +1237,7 @@ int LoadMIDI(const char* filepath)
     filePtr = NULL;
     midiloaded = 1;
     filename = getfilename(filepath);
+    loadtime = get_time() - loadstart;
     printparsestatistics();
     return midiloaded;
 }
@@ -965,10 +1259,10 @@ void UnloadMIDI(void)
     
     TempoEvent_arr_free(&tempos);
     SysExEvent_arr_free(&sysexs);
-    free(eventArr);
-    free(timingArr);
+    big_free(eventArr);
+    big_free(timingArr);
     // trackcolors can be toggled between load and unload, so key off the pointer
-    free(trackGroups.data);
+    big_free(trackGroups.data);
     trackGroups.data = NULL;
     trackGroups.count = 0;
     sysexArr = NULL;
