@@ -14,7 +14,7 @@ double now = 0.0, last = 0.0, delta = 0.0, tick = 0.0;
 double laststatsupdate = 0.0, bpm = 120.0, tickscale = 0.0;
 volatile int paused = 0, stopping = 1;
 int64_t current_clock = 0;
-static const double onesixtyh = 0.016666666;
+#define onesixtyh 0.016666666
 static atomic_int playback_running = 0;
 static _Atomic int64_t pending_skip = 0; // seeks requested by the UI, consumed by the playback thread
 
@@ -120,7 +120,7 @@ static void update_playback_stats(void)
     if (tick >= maxTick) 
         stopping = 1;
 
-    if (tick < ppq && (timing + 1)->tick > (ppq * 10))
+    if (tick < tickscale && (timing + 1)->tick > (tickscale * 10))
         tick = (timing + 1)->tick - ppq;
         
     midifps = delta > 0.0 ? 1.0 / delta : 0.0;
@@ -166,8 +166,8 @@ void SubmitSysEx(SysExEvent sysex)
         MIDIHDR header = 
         {
             sysex.message,
-            (uint32_t)sysex.size * sizeof(uint8_t),
-            (uint32_t)sysex.size * sizeof(uint8_t),
+            (uint32_t)sysex.size,
+            (uint32_t)sysex.size,
             0
         };
         uint32_t size = (uint32_t)sizeof(MIDIHDR);
@@ -176,14 +176,13 @@ void SubmitSysEx(SysExEvent sysex)
         if (prepare == 0)
         {
             send = KDMAPI_SendDirectLongData(&header, size);
-            // always unprepare once prepared, even if the send failed
             while ((unprepare = KDMAPI_UnprepareLongData(&header, size)) == 65 && send == 0) // MIDIERR_STILLPLAYING
                 os_sleep_ms(1);
         }
         if (prepare != 0 || send != 0 || unprepare != 0)
             printf("sysex prepare,send,unprepare returned (%d,%d,%d)", prepare, send, unprepare);
     #else
-        uint32_t send = KDMAPI_SendDirectLongData(sysex.message, sysex.size * sizeof(uint8_t));
+        uint32_t send = KDMAPI_SendDirectLongData(sysex.message, sysex.size);
         if (send != 0)
             printf("sysex send returned (%d)", send);
     #endif
@@ -195,6 +194,7 @@ void Playback_StopAndWait(void)
     while (atomic_load(&playback_running))
         os_sleep_ms(1);
 }
+//#define SHARKMIDI_BATCH_INTO_LONGMSG
 
 void StartPlayback(int singlethread)
 {
@@ -207,7 +207,8 @@ void StartPlayback(int singlethread)
     if (atomic_exchange(&playback_running, 1))
         return; // already playing
     playednotes = 0, playednotes2 = 0;
-    uint24_t* eventptr = eventArr;
+    const uint8_t* eventptr = eventArr;
+    int64_t rbpos = 0; // events written to the ring so far, the ring is indexed by this, not by the byte offsets of eventArr
     timing = timingArr;
     g_tempo_cursor = tempoArr;
     SysExEvent* sysex = sysexArr;
@@ -236,20 +237,33 @@ void StartPlayback(int singlethread)
             int64_t count = (timing + 1)->event_offset;
             if (!singlethread)
             {
-                while (played < count)
-                {
-                    int64_t rb_write = played & RINGBUFFER_MASK;
-                    int64_t chunk = MIN(count - played, (int64_t)RINGBUFFER_SIZE - rb_write);
-                    memcpy(ringbuffer + rb_write, eventptr + played, chunk * sizeof(uint24_t));
-                    played += chunk;
-                }
-                atomic_store_explicit(&writeptr, (uint32_t)(played & RINGBUFFER_MASK), memory_order_release);
+                EV_RUNS(eventptr + played, eventptr + count, ev, 
+                    ringbuffer[rbpos++ & RINGBUFFER_MASK] = uint24_from((ev[0] | (ev[1] << 8) | (ev[2] << 16)));
+                );
+                atomic_store_explicit(&writeptr, (uint32_t)(rbpos & RINGBUFFER_MASK), memory_order_release);
             }
             else
-            { 
-                while (played < count)
-                    KDMAPI_SendDirectData((uint32_t)uint24_get(eventptr + played++));
-            }        
+            {
+#ifdef SHARKMIDI_BATCH_INTO_LONGMSG
+                // hmm...
+                uint8_t buffer[65535]; 
+                size_t bytes = 0;
+                EV_RUNS(eventptr + played, eventptr + count, ev, 
+                {
+                    buffer[bytes++] = ev[0]; buffer[bytes++] = ev[1]; buffer[bytes++] = ev[2];
+                    if (bytes == sizeof(buffer)) 
+                    { 
+                        SubmitSysEx((SysExEvent){current_clock, bytes, buffer}); 
+                        bytes = 0; 
+                    }
+                });
+                if (bytes) 
+                    SubmitSysEx((SysExEvent){current_clock, bytes, buffer});
+#else
+                EV_RUNS(eventptr + played, eventptr + count, ev, { KDMAPI_SendDirectData((uint32_t)(ev[0] | (ev[1] << 8) | (ev[2] << 16))); });
+#endif
+            }
+            played = count;
             // this feels frankenstein, but its a way for smooth scrolling under throttle
             current_clock = timing->tick;
             UpdatePlaybackStats();
@@ -268,7 +282,7 @@ void StartPlayback(int singlethread)
     AllNotesOFF();
     uint8_t rolandreset[] = {0xF0, 0x41, 0x10, 0x42, 0x12, 0x40, 0x00, 0x7F, 0x00, 0x41, 0xF7};
     SubmitSysEx((SysExEvent){0, 11, rolandreset});    
-    notespersec = 0, smoothed_nps = 0;
+    notespersec = 0, smoothed_nps = 0, playednotes = 0, playednotes2 = 0;
     puts("\nPlayback finished...");
     atomic_store(&playback_running, 0);
 }

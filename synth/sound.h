@@ -5,7 +5,7 @@
 #include <stdatomic.h>
 #include <stdint.h>
 
-#define RINGBUFFER_SIZE 2097152u
+#define RINGBUFFER_SIZE 524288u
 #define RINGBUFFER_MASK (RINGBUFFER_SIZE - 1u)
 
 int Sound_Init(int singlethreaded);

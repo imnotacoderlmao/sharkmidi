@@ -3,7 +3,7 @@
 
 const char* __attribute__((noinline)) AddCommas(int64_t num)
 {
-    #define COMMAS_RING_SIZE 16
+    #define COMMAS_RING_SIZE 24
     #define COMMAS_BUF_SIZE  24
 
     // thread local ring buffer lets you call fmt_commas() multiple times in one printf()

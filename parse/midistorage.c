@@ -1,7 +1,7 @@
 #include "midistorage.h"
 #include <stddef.h>
 TickGroup* timingArr = NULL;
-uint24_t* eventArr = NULL;
+uint8_t* eventArr = NULL;
 TrackGroup_arr trackGroups = {0};
 SysExEvent* sysexArr = NULL;
 TempoEvent* tempoArr = NULL;

@@ -7,7 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define MAX_TOTAL_QUADS 1024
+#define MAX_TOTAL_QUADS 2048
 
 static const char* TextVertSrc =
 "#version 420 core\n"
@@ -76,6 +76,8 @@ void Text_Dispose(void)
     glDeleteProgram(textShader);
 }
 
+struct TempVert { float x, y, z; unsigned char col[4]; };
+struct TempVert tempBuf[512 * 4];
 void Text_Queue(float x, float y, float scale, float r, float g, float b, const char* fmt, ...)
 {
     if (totalQuads >= MAX_TOTAL_QUADS) return;
@@ -89,9 +91,6 @@ void Text_Queue(float x, float y, float scale, float r, float g, float b, const 
     for (char* c = str; *c; c++)
         if (*c != '\n' && ((unsigned char)*c < 32 || (unsigned char)*c > 126))
             *c = '?';
-
-    struct TempVert { float x, y, z; unsigned char col[4]; };
-    struct TempVert tempBuf[256 * 4];
 
     unsigned char color[4] = { (unsigned char)(r*255), (unsigned char)(g*255), (unsigned char)(b*255), 255 };
     int numQuads = stb_easy_font_print(0, 0, str, color, tempBuf, sizeof(tempBuf));
@@ -107,7 +106,7 @@ void Text_Queue(float x, float y, float scale, float r, float g, float b, const 
     totalQuads += numQuads;
 }
 
-void Text_Flush(int screenWidth, int screenHeight)
+void Text_Flush(void)
 {
     if (totalQuads <= 0) return;
 
@@ -115,7 +114,7 @@ void Text_Flush(int screenWidth, int screenHeight)
     glBufferSubData(GL_ARRAY_BUFFER, 0, totalQuads * 4 * sizeof(TextVertex), vertexBuf);
 
     glUseProgram(textShader);
-    glUniform2f(u_screenSize, (float)screenWidth, (float)screenHeight);
+    glUniform2f(u_screenSize, (float)fbWidth, (float)fbHeight);
 
     glBindVertexArray(textVAO);
     glDrawElements(GL_TRIANGLES, totalQuads * 6, GL_UNSIGNED_INT, 0);

@@ -3,5 +3,5 @@
 void Text_Init(void);
 void Text_Dispose(void);
 void Text_Queue(float x, float y, float scale, float r, float g, float b, const char* fmt, ...);
-void Text_Flush(int screenHeight, int screenWidth);
+void Text_Flush(void);
 #endif

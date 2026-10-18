@@ -8,7 +8,7 @@ void Renderer_Init(void);
 void Renderer_InitForMIDI(void);
 void Renderer_ResetForUnload(void);
 void Renderer_Dispose(void);
-void Renderer_Render(int screenWidth, int screenHeight, int32_t tick, int pad);
+void Renderer_Render(int32_t tick, int pad);
 
 extern int WindowTicks;
 extern int NotesDrawnLastFrame;
@@ -17,5 +17,5 @@ extern int EnableGlow;
 extern int EnableTransparency;
 extern int UseForceCull;
 extern int stationarynotes;
-
+extern int fbWidth, fbHeight;
 #endif

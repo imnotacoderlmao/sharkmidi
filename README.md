@@ -4,7 +4,7 @@ A (currently incomplete) C port of [SharpMIDI-Raylib](https://github.com/imnotac
 
 ## Quick info
 
-pain and suffering - Copy
+the despair branch yeah, this is where i let claude do their own thing a lot more. shit looks cryptographic at times ngl
 
 ## Requirements
 

@@ -3,17 +3,12 @@
 #include "../parse/midistorage.h"
 #include "../parse/parser.h"
 #include <stddef.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 #include "../misc/util.h"
-
-#if defined(__SSSE3__)
-#include <tmmintrin.h>
-#define HAVE_SSSE3 1
-#else
-#define HAVE_SSSE3 0
-#endif
+#include "../third_party/conmidi_digit_formatter.h"
 
 typedef struct
 {
@@ -31,6 +26,11 @@ typedef struct {
     int32_t uTransparencyEnabled;
 } FrameUniforms;
 
+typedef struct { 
+    int32_t absid; 
+    int32_t count; 
+} KeyHeader;
+
 #define TOTAL_KEYS (128 * 16 * 16) // key:128 * channel:16 * colorIdx:16
 #define MAX_WINDOW_TICKS (1 << 27) // keeps viewStart + WindowTicks inside int range
 
@@ -39,15 +39,14 @@ static GLint uc_cursorX, uc_halfWidth, uc_yBottom, uc_yTop, uc_lineColor;
 static GLuint vao, cursorVAO, vboBuffer, paletteTex;
 
 static RenderNote* ring;
-static int ringCapacity = 1 << 23;
+static int ringCapacity = 1 << 20;
 static int deferredRingCap = -1;
 static int mask;
 static int headIdx = 1, tailIdx = 1;
 
 static int paletteUploadPending = 0;
 
-static int32_t* khdr_absid;
-static uint16_t* khdr_activecount;
+static KeyHeader* khdr;
 
 static int lookaheadTicks = 500;
 static float pixelsPerTick;
@@ -128,7 +127,8 @@ static void bind_vertex_attribs(void)
 
 static void resize_ring(int newCap)
 {
-    if (newCap < 0) return;
+    if (ringCapacity != (1 << 20))
+        printf("expected vbo size limit to be reached! pre-doubling size to %s elements\n", AddCommas(newCap));
     int newMask = newCap - 1;
 
     size_t totalBytes = (size_t)newCap * sizeof(RenderNote);
@@ -194,8 +194,7 @@ void Renderer_Init(void)
     glUniform1i(glGetUniformLocation(quadShader, "uPalette"), 0);
     glUseProgram(0);
 
-    khdr_absid = calloc(TOTAL_KEYS, sizeof(int32_t));
-    khdr_activecount = calloc(TOTAL_KEYS, sizeof(uint16_t));
+    khdr = calloc(TOTAL_KEYS, sizeof(KeyHeader));
 
     glGenVertexArrays(1, &vao);
     glGenTextures(1, &paletteTex);
@@ -207,8 +206,7 @@ void Renderer_Init(void)
 void Renderer_InitForMIDI(void)
 {
     isInitialized = 0;
-    memset(khdr_activecount,0, TOTAL_KEYS * sizeof(uint16_t));
-    memset(khdr_absid,0, TOTAL_KEYS * sizeof(int32_t));
+    memset(khdr, 0, TOTAL_KEYS * sizeof(KeyHeader));
     headIdx = 1;
     tailIdx = 1;
     lastSweepEnd = -1;
@@ -225,17 +223,15 @@ void Renderer_ResetForUnload(void)
     tailIdx = 1;
     lastSweepEnd = -1;
     lastWindowTicks = -1;
-    if (ringCapacity != (1 << 23))
-        deferredRingCap = 1 << 23;
+    if (ringCapacity > (1 << 20))
+        deferredRingCap = 1 << 20;
 }
 
 void Renderer_Dispose(void)
 {
     isInitialized = 0;
-    free(khdr_absid);
-    khdr_absid = NULL;
-    free(khdr_activecount);
-    khdr_activecount = NULL;
+    free(khdr);
+    khdr = NULL;
     if (vboBuffer != 0)
     {
         glBindBuffer(GL_ARRAY_BUFFER, vboBuffer);
@@ -252,92 +248,34 @@ void Renderer_Dispose(void)
     glDeleteProgram(cursorShader);
 }
 
-static inline void process_one_event(uint8_t* messages, int64_t offset, uint8_t status, uint8_t key, uint8_t track,
-    int32_t* khdr_absid, uint16_t* khdr_activecount, RenderNote* ringLocal, int maskLocal, int64_t tick, int* headLocal)
+static inline void process_one_event(const uint8_t* ev, KeyHeader* ks, uint32_t track, RenderNote* ringLocal, int maskLocal, int64_t tick, int* headLocal)
 {
-    uint32_t headerIdx = (track | (status & 0x0Fu)) << 7 | key;
-    uint16_t count = khdr_activecount[headerIdx];
+    uint32_t status = ev[0];
+    KeyHeader* k = &ks[((track | (status & 0x0Fu)) << 7) | ev[1]];
     uint32_t statusHigh = status & 0xF0u;
-
     if (statusHigh == 0x90)
     {
-        if (count == 0)
+        if (k->count == 0)
         {
-            khdr_absid[headerIdx] = *headLocal;
-            uint32_t color = headerIdx >> 7;
-            uint8_t velocity = messages[offset * 3 + 2];
-            ringLocal[*headLocal & maskLocal] = (RenderNote){
-                .StartTick = tick,
-                .EndTick = 0,
-                .PackedData = (color << 16) | ((uint32_t)key << 8) | velocity
-            };
+            k->absid = *headLocal;
+            uint32_t color = (track | (status & 0x0Fu));
+            ringLocal[*headLocal & maskLocal] = (RenderNote){.StartTick = tick, .EndTick = 0, .PackedData = (color << 16) | ((uint32_t)ev[1] << 8) | ev[2]};
             (*headLocal)++;
         }
-        count++;
+        k->count++;
     }
     else if (statusHigh == 0x80)
     {
-        if (count > 0)
-        {
-            count--;
-            if (count == 0)
-            {
-                int absid = khdr_absid[headerIdx];
-                if (absid >= *headLocal - (maskLocal + 1))
-                    ringLocal[absid & maskLocal].EndTick = tick;
-            }
-        }
+        if (k->count > 0 && --k->count == 0 && k->absid >= *headLocal - (maskLocal + 1))
+            ringLocal[k->absid & maskLocal].EndTick = tick;
     }
-    khdr_activecount[headerIdx] = count;
 }
 
-#if HAVE_SSSE3
-static const uint8_t StatusShuffleMaskBytes[16] __attribute__((aligned(16))) = {
-    0, 3, 6, 9, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80
-};
-static const uint8_t KeyShuffleMaskBytes[16] __attribute__((aligned(16))) = {
-    1, 4, 7, 10, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80
-};
-#endif
-
-static int64_t process_run_events(uint8_t* messages, uint8_t track, int32_t* khdr_absid, uint16_t* khdr_activecount,
-    RenderNote* ringLocal, int maskLocal, int64_t currentOffset, int64_t runEnd, int64_t tick, int* headLocal)
+// [currentOffset, runEnd) are whole runs of eventArr (see midistorage.h), offsets are in bytes
+static int64_t process_run_events(uint8_t* messages, uint8_t track, KeyHeader* ks, RenderNote* ringLocal, int maskLocal, int64_t currentOffset, int64_t runEnd, int64_t tick, int* headLocal)
 {
-#if HAVE_SSSE3
-    __m128i statusMask = _mm_load_si128((const __m128i*)StatusShuffleMaskBytes);
-    __m128i keyMask    = _mm_load_si128((const __m128i*)KeyShuffleMaskBytes);
-
-    while (runEnd - currentOffset >= 4)
-    {
-        uint8_t* synthev = messages + currentOffset * 3;
-        __m128i raw = _mm_lddqu_si128((const __m128i*)synthev);
-
-        __m128i statusVec = _mm_shuffle_epi8(raw, statusMask);
-        __m128i keyVec    = _mm_shuffle_epi8(raw, keyMask);
-
-        uint32_t statusPacked = (uint32_t)_mm_cvtsi128_si32(statusVec);
-        uint32_t keyPacked    = (uint32_t)_mm_cvtsi128_si32(keyVec);
-
-        for (int lane = 0; lane < 4; lane++)
-        {
-            uint8_t status = (uint8_t)(statusPacked >> (lane * 8));
-            uint8_t key    = (uint8_t)(keyPacked >> (lane * 8));
-
-            process_one_event(messages, currentOffset + lane, status, key, track,
-                khdr_absid, khdr_activecount, ringLocal, maskLocal, tick, headLocal);
-        }
-        currentOffset += 4;
-    }
-#endif
-
-    while (currentOffset < runEnd)
-    {
-        uint8_t* synthev = messages + currentOffset * 3;
-        process_one_event(messages, currentOffset, synthev[0], synthev[1], track,
-            khdr_absid, khdr_activecount, ringLocal, maskLocal, tick, headLocal);
-        currentOffset++;
-    }
-    return currentOffset;
+    EV_RUNS(messages + currentOffset, messages + runEnd, ev, { process_one_event(ev, ks, track, ringLocal, maskLocal, tick, headLocal); });
+    return runEnd;
 }
 
 static int64_t find_active_tick_idx(int64_t targetTick)
@@ -360,25 +298,6 @@ static int64_t find_active_tick_idx(int64_t targetTick)
     return ans;
 }
 
-static int64_t find_track_group_idx(int64_t targetOffset)
-{
-    int64_t low = 0;
-    int64_t high = (int64_t)trackGroups.count - 1;
-    int64_t ans = 0;
-
-    while (low <= high)
-    {
-        int64_t mid = low + (high - low) / 2;
-        if (trackGroups.data[mid].event_offset <= targetOffset)
-        {
-            ans = mid;
-            low = mid + 1;
-        }
-        else
-            high = mid - 1;
-    }
-    return ans;
-}
 
 static void sweep_range(int64_t fromTick, int64_t toTick)
 {
@@ -393,26 +312,26 @@ static void sweep_range(int64_t fromTick, int64_t toTick)
     if (idx >= activetickcount) return;
 
     int64_t currentOffset = timingArr[idx].event_offset;
-    int64_t groupIdx = (trackGroups.data && trackGroups.count > 0) ? find_track_group_idx(currentOffset) : 0;
+    int64_t groupStart = 0; // event offset where run groupIdx starts
+    int64_t groupIdx = (trackGroups.runs && trackGroups.count > 0) ? tg_find(&trackGroups, currentOffset, &groupStart) : 0;
 
-    while ((groupIdx < trackGroups.count) && (trackGroups.data[groupIdx].event_offset + trackGroups.data[groupIdx].count <= currentOffset))
-        groupIdx++;
-
+    while ((groupIdx < trackGroups.count) && (groupStart + tg_run_count(trackGroups.runs[groupIdx]) <= currentOffset))
+        groupStart += tg_run_count(trackGroups.runs[groupIdx++]);
     while (idx < activetickcount && timingArr[idx].tick <= limit)
     {
         int64_t tick = timingArr[idx].tick;
         int64_t nextOffset = timingArr[idx + 1].event_offset;
 
+        // nextOffset - currentOffset is bytes, which is at least the number of events, so this can only ask for more room than needed
         while (headLocal - tailIdx + (nextOffset - currentOffset) >= mask + 1)
         {
             headIdx = headLocal;
             resize_ring((mask + 1) * 2);
         }
 
-        if (trackGroups.data == NULL || trackGroups.count == 0)
+        if (trackGroups.runs == NULL || trackGroups.count == 0)
         {
-            currentOffset = process_run_events(messages, 0, khdr_absid, khdr_activecount, ring, mask,
-                currentOffset, nextOffset, tick, &headLocal);
+            currentOffset = process_run_events(messages, 0, khdr, ring, mask, currentOffset, nextOffset, tick, &headLocal);
         }
         else
         {
@@ -420,21 +339,23 @@ static void sweep_range(int64_t fromTick, int64_t toTick)
             {
                 if (groupIdx >= trackGroups.count)
                 {
-                    currentOffset = process_run_events(messages, 0, khdr_absid, khdr_activecount, ring, mask,
-                        currentOffset, nextOffset, tick, &headLocal);
+                    currentOffset = process_run_events(messages, 0, khdr, ring, mask, currentOffset, nextOffset, tick, &headLocal);
                     break;
                 }
 
-                TrackGroup* group = &trackGroups.data[groupIdx];
-                int64_t runEnd = group->event_offset + group->count;
+                uint32_t run = trackGroups.runs[groupIdx];
+                int64_t groupEnd = groupStart + tg_run_count(run);
+                int64_t runEnd = groupEnd;
                 if (runEnd > nextOffset) runEnd = nextOffset;
 
-                uint8_t track = group->track;
-                currentOffset = process_run_events(messages, track, khdr_absid, khdr_activecount, ring, mask,
-                    currentOffset, runEnd, tick, &headLocal);
+                uint8_t track = tg_run_track(run);
+                currentOffset = process_run_events(messages, track, khdr, ring, mask, currentOffset, runEnd, tick, &headLocal);
 
-                if (currentOffset >= group->event_offset + group->count)
+                if (currentOffset >= groupEnd)
+                {
+                    groupStart = groupEnd;
                     groupIdx++;
+                }
             }
         }
         idx++;
@@ -541,18 +462,19 @@ static void draw_cursor(float cursorX, int screenWidth, float yBottom, float yTo
     glUseProgram(0);
 }
 
-void Renderer_Render(int screenWidth, int screenHeight, int32_t tick, int pad)
+int fbWidth = 0, fbHeight = 0;
+void Renderer_Render(int32_t tick, int pad)
 {
-    if (!midiloaded || !isInitialized) return;
-
-    if (paletteUploadPending)
-        upload_palette();
-
     if (deferredRingCap > 0)
     {
         resize_ring(deferredRingCap);
         deferredRingCap = -1;
     }
+
+    if (!midiloaded || !isInitialized) return;
+
+    if (paletteUploadPending)
+        upload_palette();
 
     // zoom keys and dynamic scroll can push this to 0 (division by zero below) or overflow int math
     WindowTicks = MAX(1, MIN(WindowTicks, MAX_WINDOW_TICKS));
@@ -575,8 +497,7 @@ void Renderer_Render(int screenWidth, int screenHeight, int32_t tick, int pad)
     {
         headIdx = 1;
         tailIdx = 1;
-        memset(khdr_activecount,0, TOTAL_KEYS * sizeof(uint16_t));
-        memset(khdr_absid,0, TOTAL_KEYS * sizeof(int32_t));
+        memset(khdr, 0, TOTAL_KEYS * sizeof(KeyHeader));
         sweep_range(MAX(viewStart - WindowTicks, 0), sweepEnd);
     }
     else
@@ -590,10 +511,10 @@ void Renderer_Render(int screenWidth, int screenHeight, int32_t tick, int pad)
     NotesDrawnLastFrame = headIdx - tailIdx;
     RingCap = ringCapacity;
 
-    float yBottom = -1.0f + 2.0f * pad / screenHeight;
-    float yTop = 1.0f - 2.0f * pad / screenHeight;
+    float yBottom = -1.0f + 2.0f * pad / fbHeight;
+    float yTop = 1.0f - 2.0f * pad / fbHeight;
 
     if (NotesDrawnLastFrame > 0)
         draw_notes(viewStart, viewEnd, tick, yBottom, yTop, pixelsPerTick);
-    draw_cursor((float)(tick - viewStart) * pixelsPerTick - 1.0f, screenWidth, yBottom, yTop);
+    draw_cursor((float)(tick - viewStart) * pixelsPerTick - 1.0f, fbWidth, yBottom, yTop);
 }
