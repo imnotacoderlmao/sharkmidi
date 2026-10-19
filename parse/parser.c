@@ -50,10 +50,12 @@ static uint64_t bytecount = 0;  // bytes they take in eventArr (see midistorage.
 //   SHARKMIDI_TRACE=1          prints where the time between the counted phases goes
 static int g_trace = 0;
 // events are parsed in output order tiles (see ParseTiled). SHARKMIDI_TILE_KB sets the output size of one tile
-// in KB (default 1024)
+// in KB (default 1024, or more for files with many tracks, see ParseTiled)
 static int g_tile_kb = 1024;
+static int g_tile_set = 0; // the size was asked for, so it is used as it is
 typedef struct
 {
+    int64_t tile_kb;
     double mainalloc, rank_alloc, rank_bounds, rank_pass1, rank_scan, rank_pass2, rank_free, compact, evalloc, tail;
     int rank_used;
 } TraceTimes;
@@ -709,6 +711,11 @@ static NOIPA int64_t ParseRange(Cursor* cur, uint8_t* trackEnd, uint8_t* msgPtr,
                         int64_t size = *trackPtr++;
                         if (size >= 0x80)
                             size = varlen_decode_slow(&size, &trackPtr);
+                        if (size > trackEnd - trackPtr) // a length running past the end of the track is corrupt, nothing there to read
+                        {
+                            trackPtr = trackEnd;
+                            continue;
+                        }
                         if (!store)
                         {
                             trackPtr += size;
@@ -747,12 +754,18 @@ static NOIPA int64_t ParseRange(Cursor* cur, uint8_t* trackEnd, uint8_t* msgPtr,
                             int64_t len = *trackPtr++;
                             if (len >= 0x80)
                                 len = varlen_decode_slow(&len, &trackPtr);
-                            int32_t tempoVal = 0;
-                            for (int i = 0; i < len; i++)
-                                tempoVal = (tempoVal << 8) | *trackPtr++;
+                            if (len > trackEnd - trackPtr) // runs past the end of the track: corrupt
+                            {
+                                trackPtr = trackEnd;
+                                continue;
+                            }
+                            uint32_t tempoVal = 0; // 3 bytes in a valid file, a longer one is read for its first 4
+                            for (int i = 0; i < len && i < 4; i++)
+                                tempoVal = (tempoVal << 8) | trackPtr[i];
+                            trackPtr += len;
                             if (store)
                             {
-                                TempoEvent tev = {absolutetime, tempoVal};
+                                TempoEvent tev = {absolutetime, (int32_t)tempoVal};
                                 #ifdef _OPENMP
                                     #pragma omp critical
                                 #endif
@@ -852,13 +865,23 @@ static void ParseTiled(const trackProperties_arr* tracks, TrackTick_arr* hist, c
         free(tl);
         return;
     }
-    int64_t bev = (int64_t)g_tile_kb * 1024; // bytes of eventArr per tile
-    if (bev < 1) bev = 1;
-    int64_t nb = (total + bev - 1) / bev;
     int threads = 1;
     #ifdef _OPENMP
         threads = omp_get_max_threads();
     #endif
+    int64_t bev = (int64_t)g_tile_kb * 1024; // bytes of eventArr per tile
+    if (!g_tile_set)
+    {
+        // a tile visits every track, and every visit costs a call and a cache miss or two on that track's input
+        // before it does any work. with many tracks a tile has to be bigger so each visit gets real work, about
+        // 2 KB of output per track, but never so big that a thread has fewer than 4 tiles to share out
+        int64_t want = (int64_t)nt * 2048, cap = total / ((int64_t)threads * 4);
+        if (want > cap) want = cap;
+        if (want > bev) bev = want;
+    }
+    if (bev < 1) bev = 1;
+    tr.tile_kb = bev >> 10;
+    int64_t nb = (total + bev - 1) / bev;
     int64_t ns = (int64_t)threads * 8; // several slices per thread, they are claimed dynamically
     if (ns > nb) ns = nb;
     #if !defined(_WIN32) && !defined(_WIN64)
@@ -990,7 +1013,7 @@ static void printtrace(void)
     printf("=============== TRACE (SHARKMIDI_TRACE) ===============\n");
     printf("   OpenMP threads:        %d\n", threads);
     printf("   merge path:            %s\n", tr.rank_used ? "rank" : "heap (merge_timing)");
-    printf("   parse:                 tiled, %d KB output per tile\n", g_tile_kb);
+    printf("   parse:                 tiled, %lld KB output per tile\n", (long long)tr.tile_kb);
     printf("   timing/track alloc:    %lfs\n", tr.mainalloc);
     if (tr.rank_used)
     {
@@ -1405,8 +1428,12 @@ int LoadMIDI(const char* filepath)
     UnloadMIDI();
     trackAmount = 0, totalnotes = 0, eventcount = 0, bytecount = 0, playednotes = 0, maxTick = 0;
     g_trace = env_flag("SHARKMIDI_TRACE");
+    g_tile_set = 0;
     if (getenv("SHARKMIDI_TILE_KB") && atoi(getenv("SHARKMIDI_TILE_KB")) > 0)
+    {
         g_tile_kb = atoi(getenv("SHARKMIDI_TILE_KB"));
+        g_tile_set = 1;
+    }
     tr = (TraceTimes){0};
     updatestatsandprint("initiating memory mapped file\n");
     
