@@ -1,0 +1,49 @@
+name: build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux
+            packages: libglfw3-dev libgl-dev
+            cc: gcc
+            bin: build/sharkmidi
+          - target: windows
+            packages: gcc-mingw-w64-x86-64-posix
+            cc: x86_64-w64-mingw32-gcc-posix -static
+            bin: build/sharkmidi.exe
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Dependencies
+        run: |
+          sudo rm -f /var/lib/man-db/auto-update
+          sudo apt-get install -y --no-install-recommends ${{ matrix.packages }} || { sudo apt-get update -o Acquire::Languages=none && sudo apt-get install -y --no-install-recommends ${{ matrix.packages }}; }
+
+      - name: GLFW
+        if: matrix.target == 'windows'
+        run: |
+          curl -sSfL -o "$RUNNER_TEMP/glfw.zip" https://github.com/glfw/glfw/releases/download/3.4/glfw-3.4.bin.WIN64.zip
+          unzip -q "$RUNNER_TEMP/glfw.zip" -d "$RUNNER_TEMP"
+          echo "GLFW_WIN_DIR=$RUNNER_TEMP/glfw-3.4.bin.WIN64" >> "$GITHUB_ENV"
+
+      - name: Build
+        run: make -j"$(nproc)" CC="${{ matrix.cc }}"
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: sharkmidi-${{ matrix.target }}
+          path: ${{ matrix.bin }}
+          if-no-files-found: error
