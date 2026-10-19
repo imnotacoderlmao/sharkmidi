@@ -250,7 +250,9 @@ void StartPlayback(int singlethread)
                 size_t bytes = 0;
                 EV_RUNS(eventptr + played, eventptr + count, ev, 
                 {
-                    buffer[bytes++] = ev[0]; buffer[bytes++] = ev[1]; buffer[bytes++] = ev[2];
+                    buffer[bytes++] = ev[0]; 
+                    buffer[bytes++] = ev[1]; 
+                    buffer[bytes++] = ev[2];
                     if (bytes == sizeof(buffer)) 
                     { 
                         SubmitSysEx((SysExEvent){current_clock, bytes, buffer}); 

@@ -31,7 +31,6 @@ typedef struct {
     int32_t count; 
 } KeyHeader;
 
-#define TOTAL_KEYS (128 * 16 * 16) // key:128 * channel:16 * colorIdx:16
 #define MAX_WINDOW_TICKS (1 << 27) // keeps viewStart + WindowTicks inside int range
 
 static GLuint quadShader, cursorShader, frameUBO;
@@ -46,7 +45,62 @@ static int headIdx = 1, tailIdx = 1;
 
 static int paletteUploadPending = 0;
 
-static KeyHeader* khdr;
+// overlap tracking: every (track, channel) that plays gets a block of 128 key headers, so notes of different tracks
+// or channels never share a header. a block is made when its (track, channel) first plays, from chunks of KB_CHUNK
+// blocks, and kbTab, indexed by track << 4 | channel, finds it. only the track table and the used blocks cost memory
+#define KB_CHUNK 1024
+typedef struct { void* base; KeyHeader* blocks; } KbChunk;
+static KeyHeader** kbTab;
+static int64_t kbTracks;     // tracks kbTab has room for
+static KbChunk* kbChunks;
+static int kbChunkCount, kbChunkCap;
+static int kbUsed;           // blocks used in the last chunk
+
+static void kb_release(void)
+{
+    for (int i = 0; i < kbChunkCount; i++)
+        free(kbChunks[i].base);
+    free(kbChunks);
+    free(kbTab);
+    kbChunks = NULL;
+    kbTab = NULL;
+    kbChunkCount = kbChunkCap = kbUsed = 0;
+    kbTracks = 0;
+}
+
+// forgets every note, keeps the blocks
+static void kb_zero(void)
+{
+    for (int i = 0; i < kbChunkCount; i++)
+        memset(kbChunks[i].blocks, 0, (i + 1 < kbChunkCount ? KB_CHUNK : kbUsed) * 128 * sizeof(KeyHeader));
+}
+
+static KeyHeader* kb_alloc(void)
+{
+    if (kbChunkCount == 0 || kbUsed == KB_CHUNK)
+    {
+        if (kbChunkCount == kbChunkCap)
+        {
+            kbChunkCap = kbChunkCap ? kbChunkCap * 2 : 16;
+            kbChunks = realloc(kbChunks, kbChunkCap * sizeof(KbChunk));
+        }
+        void* base = calloc((size_t)KB_CHUNK * 128 * sizeof(KeyHeader) + 64, 1);
+        kbChunks[kbChunkCount].base = base;
+        kbChunks[kbChunkCount].blocks = (KeyHeader*)(((uintptr_t)base + 63) & ~(uintptr_t)63); // 64 byte aligned: a block is 16 cache lines
+        kbChunkCount++;
+        kbUsed = 0;
+    }
+    return &kbChunks[kbChunkCount - 1].blocks[(size_t)(kbUsed++) * 128];
+}
+
+static void kb_grow(uint32_t track)
+{
+    int64_t n = kbTracks ? kbTracks : 16;
+    while (n <= (int64_t)track) n *= 2;
+    kbTab = realloc(kbTab, (size_t)n * 16 * sizeof(KeyHeader*));
+    memset(kbTab + kbTracks * 16, 0, (size_t)(n - kbTracks) * 16 * sizeof(KeyHeader*));
+    kbTracks = n;
+}
 
 static int lookaheadTicks = 500;
 static float pixelsPerTick;
@@ -194,8 +248,6 @@ void Renderer_Init(void)
     glUniform1i(glGetUniformLocation(quadShader, "uPalette"), 0);
     glUseProgram(0);
 
-    khdr = calloc(TOTAL_KEYS, sizeof(KeyHeader));
-
     glGenVertexArrays(1, &vao);
     glGenTextures(1, &paletteTex);
 
@@ -206,7 +258,7 @@ void Renderer_Init(void)
 void Renderer_InitForMIDI(void)
 {
     isInitialized = 0;
-    memset(khdr, 0, TOTAL_KEYS * sizeof(KeyHeader));
+    kb_release(); // the new file has other tracks
     headIdx = 1;
     tailIdx = 1;
     lastSweepEnd = -1;
@@ -230,8 +282,7 @@ void Renderer_ResetForUnload(void)
 void Renderer_Dispose(void)
 {
     isInitialized = 0;
-    free(khdr);
-    khdr = NULL;
+    kb_release();
     if (vboBuffer != 0)
     {
         glBindBuffer(GL_ARRAY_BUFFER, vboBuffer);
@@ -248,18 +299,15 @@ void Renderer_Dispose(void)
     glDeleteProgram(cursorShader);
 }
 
-static inline void process_one_event(const uint8_t* ev, KeyHeader* ks, uint32_t track, RenderNote* ringLocal, int maskLocal, int64_t tick, int* headLocal)
+static inline __attribute__((always_inline))
+void process_one_event(KeyHeader* k, uint32_t statusHigh, uint32_t key, uint32_t velocity, uint32_t color, RenderNote* ringLocal, int maskLocal, int64_t tick, int* headLocal)
 {
-    uint32_t status = ev[0];
-    KeyHeader* k = &ks[((track | (status & 0x0Fu)) << 7) | ev[1]];
-    uint32_t statusHigh = status & 0xF0u;
     if (statusHigh == 0x90)
     {
         if (k->count == 0)
         {
             k->absid = *headLocal;
-            uint32_t color = (track | (status & 0x0Fu));
-            ringLocal[*headLocal & maskLocal] = (RenderNote){.StartTick = tick, .EndTick = 0, .PackedData = (color << 16) | ((uint32_t)ev[1] << 8) | ev[2]};
+            ringLocal[*headLocal & maskLocal] = (RenderNote){.StartTick = tick, .EndTick = 0, .PackedData = (color << 16) | (key << 8) | velocity};
             (*headLocal)++;
         }
         k->count++;
@@ -271,10 +319,20 @@ static inline void process_one_event(const uint8_t* ev, KeyHeader* ks, uint32_t 
     }
 }
 
-// [currentOffset, runEnd) are whole runs of eventArr (see midistorage.h), offsets are in bytes
-static int64_t process_run_events(uint8_t* messages, uint8_t track, KeyHeader* ks, RenderNote* ringLocal, int maskLocal, int64_t currentOffset, int64_t runEnd, int64_t tick, int* headLocal)
+// [currentOffset, runEnd) are whole runs of eventArr (see midistorage.h), offsets are in bytes, all of one track.
+// a run has one status, so its channel, and with it the key block, is looked up once per run. the colour only has
+// room for 16 tracks (the palette), so tracks past that repeat colours, but never share key headers
+static int64_t process_run_events(uint8_t* messages, uint32_t track, RenderNote* ringLocal, int maskLocal, int64_t currentOffset, int64_t runEnd, int64_t tick, int* headLocal)
 {
-    EV_RUNS(messages + currentOffset, messages + runEnd, ev, { process_one_event(ev, ks, track, ringLocal, maskLocal, tick, headLocal); });
+    if (UNLIKELY(track >= (uint64_t)kbTracks)) kb_grow(track);
+    EV_RUNS_EX(messages + currentOffset, messages + runEnd, st, third, key,
+        KeyHeader** slot = &kbTab[((int64_t)track << 4) | (st & 0x0F)];
+        KeyHeader* kb = *slot;
+        if (UNLIKELY(!kb)) kb = *slot = kb_alloc();
+        const uint32_t color = ((track & 15) << 4) | (st & 0x0F);
+        const uint32_t statusHigh = st & 0xF0;
+        ,
+    { process_one_event(&kb[key], statusHigh, key, third, color, ringLocal, maskLocal, tick, headLocal); });
     return runEnd;
 }
 
@@ -315,8 +373,8 @@ static void sweep_range(int64_t fromTick, int64_t toTick)
     int64_t groupStart = 0; // event offset where run groupIdx starts
     int64_t groupIdx = (trackGroups.runs && trackGroups.count > 0) ? tg_find(&trackGroups, currentOffset, &groupStart) : 0;
 
-    while ((groupIdx < trackGroups.count) && (groupStart + tg_run_count(trackGroups.runs[groupIdx]) <= currentOffset))
-        groupStart += tg_run_count(trackGroups.runs[groupIdx++]);
+    while ((groupIdx < trackGroups.count) && (groupStart + trackGroups.runs[groupIdx] <= currentOffset))
+        groupStart += trackGroups.runs[groupIdx++];
     while (idx < activetickcount && timingArr[idx].tick <= limit)
     {
         int64_t tick = timingArr[idx].tick;
@@ -331,7 +389,7 @@ static void sweep_range(int64_t fromTick, int64_t toTick)
 
         if (trackGroups.runs == NULL || trackGroups.count == 0)
         {
-            currentOffset = process_run_events(messages, 0, khdr, ring, mask, currentOffset, nextOffset, tick, &headLocal);
+            currentOffset = process_run_events(messages, 0, ring, mask, currentOffset, nextOffset, tick, &headLocal);
         }
         else
         {
@@ -339,17 +397,15 @@ static void sweep_range(int64_t fromTick, int64_t toTick)
             {
                 if (groupIdx >= trackGroups.count)
                 {
-                    currentOffset = process_run_events(messages, 0, khdr, ring, mask, currentOffset, nextOffset, tick, &headLocal);
+                    currentOffset = process_run_events(messages, 0, ring, mask, currentOffset, nextOffset, tick, &headLocal);
                     break;
                 }
 
-                uint32_t run = trackGroups.runs[groupIdx];
-                int64_t groupEnd = groupStart + tg_run_count(run);
+                int64_t groupEnd = groupStart + trackGroups.runs[groupIdx];
                 int64_t runEnd = groupEnd;
                 if (runEnd > nextOffset) runEnd = nextOffset;
 
-                uint8_t track = tg_run_track(run);
-                currentOffset = process_run_events(messages, track, khdr, ring, mask, currentOffset, runEnd, tick, &headLocal);
+                currentOffset = process_run_events(messages, trackGroups.tracks[groupIdx], ring, mask, currentOffset, runEnd, tick, &headLocal);
 
                 if (currentOffset >= groupEnd)
                 {
@@ -497,7 +553,7 @@ void Renderer_Render(int32_t tick, int pad)
     {
         headIdx = 1;
         tailIdx = 1;
-        memset(khdr, 0, TOTAL_KEYS * sizeof(KeyHeader));
+        kb_zero();
         sweep_range(MAX(viewStart - WindowTicks, 0), sweepEnd);
     }
     else

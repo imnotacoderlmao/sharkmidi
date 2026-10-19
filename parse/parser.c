@@ -1,6 +1,7 @@
 #include "parser.h"
 #include "midistorage.h"
 #include "../misc/typed-array.h"
+#include "../misc/util.h"
 #include "../playback/timer.h"
 #include "../playback/playback_thread.h"
 #include "../third_party/conmidi_digit_formatter.h"
@@ -296,8 +297,6 @@ static int cmp_sysex(const void* a, const void* b)
     int64_t posb = ((const SysExEvent*)b)->tick;
     return (posa > posb) - (posa < posb);
 }
-
-#define UNLIKELY(x) __builtin_expect(!!(x), 0)
 
 // the two hot parsers are only called from LoadMIDI. noipa keeps them out of line and free of the interprocedural
 // tweaks (cloning, register allocation) that being static would allow, which measured a few percent slower
@@ -972,7 +971,7 @@ static void printparsestatistics(void)
     "       Total:              %s Bytes\n"
     "===============================================\n";
 
-    uint64_t trackRLEBytes = trackGroups.runs ? trackGroups.count * sizeof(uint32_t) + ((trackGroups.count + TG_ANCHOR - 1) / TG_ANCHOR) * sizeof(int64_t) : 0;
+    uint64_t trackRLEBytes = trackGroups.runs ? trackGroups.count * (sizeof(uint32_t) + sizeof(uint16_t)) + ((trackGroups.count + TG_ANCHOR - 1) / TG_ANCHOR) * sizeof(int64_t) : 0;
     printf(parsestatistics, filename, 
         AddCommas(fileLen), counttime, AddCommas((totalnotes / counttime)), tickcounttime, AddCommas((maxTick / tickcounttime)), mergetime, AddCommas((maxTick / mergetime)), parsetime,
         AddCommas((totalnotes / parsetime)), AddCommas(ppq), AddCommas(maxTick), AddCommas(activetickcount), AddCommas(trackAmount),
@@ -1051,14 +1050,11 @@ typedef struct
     int64_t entry;   // groups emitted so far
 } MergeState;
 
-static volatile int tg_overflow = 0;
-
-// stores one run of the track index. a run longer than TG_COUNT_MAX events can't be represented, that is
-// noticed after the merge and the track index is dropped (the renderer then has no track colors)
+// stores one run of the track index (a track is below 65536, a group is within one track chunk, below 4 GB)
 static inline void tg_put(int64_t idx, int64_t offset, uint32_t count, uint32_t track)
 {
-    if (UNLIKELY(count > TG_COUNT_MAX)) tg_overflow = 1;
-    trackGroups.runs[idx] = (count << 4) | (track & 15);
+    trackGroups.runs[idx] = count;
+    trackGroups.tracks[idx] = (uint16_t)track;
     if ((idx & (TG_ANCHOR - 1)) == 0)
         trackGroups.anchors[idx / TG_ANCHOR] = offset;
 }
@@ -1067,8 +1063,10 @@ static void tg_drop(const char* why)
 {
     printf("track colors off for this file: %s\n", why);
     free(trackGroups.runs);
+    free(trackGroups.tracks);
     free(trackGroups.anchors);
     trackGroups.runs = NULL;
+    trackGroups.tracks = NULL;
     trackGroups.anchors = NULL;
     trackGroups.count = 0;
 }
@@ -1407,7 +1405,6 @@ int LoadMIDI(const char* filepath)
     UnloadMIDI();
     trackAmount = 0, totalnotes = 0, eventcount = 0, bytecount = 0, playednotes = 0, maxTick = 0;
     g_trace = env_flag("SHARKMIDI_TRACE");
-    tg_overflow = 0;
     if (getenv("SHARKMIDI_TILE_KB") && atoi(getenv("SHARKMIDI_TILE_KB")) > 0)
         g_tile_kb = atoi(getenv("SHARKMIDI_TILE_KB"));
     tr = (TraceTimes){0};
@@ -1473,9 +1470,10 @@ int LoadMIDI(const char* filepath)
     if (trackcolors)
     {
         trackGroups.runs = malloc((size_t)total_entries * sizeof(uint32_t));
+        trackGroups.tracks = malloc((size_t)total_entries * sizeof(uint16_t));
         trackGroups.anchors = malloc((size_t)((total_entries + TG_ANCHOR - 1) / TG_ANCHOR + 1) * sizeof(int64_t));
         trackGroups.count = total_entries;
-        if (!trackGroups.runs || !trackGroups.anchors)
+        if (!trackGroups.runs || !trackGroups.tracks || !trackGroups.anchors)
             tg_drop("out of memory for the track index");
     }
     TR_LAP(mainalloc, trmark);
@@ -1490,8 +1488,6 @@ int LoadMIDI(const char* filepath)
     if (!merged)
         merge_timing(histogram, trackAmount, 1);
     free(tickbits);
-    if (tg_overflow && trackGroups.runs)
-        tg_drop("a track plays more than 268 million events in one tick");
     mergetime = get_time() - mergestart;
     trmark = g_trace ? get_time() : 0.0;
 
@@ -1590,8 +1586,10 @@ void UnloadMIDI(void)
     free(timingArr);
     // trackcolors can be toggled between load and unload, so key off the pointer
     free(trackGroups.runs);
+    free(trackGroups.tracks);
     free(trackGroups.anchors);
     trackGroups.runs = NULL;
+    trackGroups.tracks = NULL;
     trackGroups.anchors = NULL;
     trackGroups.count = 0;
     sysexArr = NULL;
