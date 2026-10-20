@@ -7,6 +7,7 @@
 #include <math.h>
 #include <stdatomic.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
 int64_t playednotes = 0, playednotes2 = 0, notespersec = 0;
@@ -16,9 +17,30 @@ volatile int paused = 0, stopping = 1;
 int64_t current_clock = 0;
 #define onesixtyh 0.016666666
 static atomic_int playback_running = 0;
-static _Atomic int64_t pending_skip = 0; // seeks requested by the UI, consumed by the playback thread
+_Atomic double playback_next_due = 0.0;
+static _Atomic int64_t pending_skip = 0; // ticks the windower adds to skip so anything important like tempo resync n stuff happens on one thread
 
 static TempoEvent* g_tempo_cursor = NULL;
+#define MAX_SLEEP_US 2000
+static double spin_margin = DEFAULT_SPIN_US * 1e-6;
+
+static void wait_for_next_tick(int64_t clock)
+{
+    if (tickscale > MAX_TPS_FOR_SPIN) 
+        return;
+    double dt = ((double)(clock + 1) - tick) / tickscale;
+    double to_tempo = (g_tempo_cursor->tick - tick) / tickscale;
+    if (to_tempo < dt) 
+        dt = to_tempo;
+    if (dt > MAX_SLEEP_US * 1e-6) 
+        dt = MAX_SLEEP_US * 1e-6;
+    atomic_store_explicit(&playback_next_due, last + dt, memory_order_relaxed);
+    double wake = last + dt - spin_margin;
+    if (wake - get_time() > 0.0)
+        os_sleep_until(wake);
+    else
+        os_cpu_relax();
+}
 
 void clock_start(void)
 {
@@ -33,18 +55,16 @@ void clock_start(void)
 
 void SetBPM(int32_t microsec)
 {
-    if (microsec <= 0) return; // a zero tempo would make tickscale infinite
     bpm = 60000000.0 / microsec;
     tickscale = (bpm * ppq) / 60.0;
 }
 
-// tempo events are sorted, so walk the cursor to the first event past `tick` (works in both directions)
 static void resync_tempo_cursor(void)
 {
     while (g_tempo_cursor > tempoArr && g_tempo_cursor->tick > tick)
         g_tempo_cursor--;
     if (g_tempo_cursor->tick > tick)
-        SetBPM(500000); // seeked before the first tempo event, back to the MIDI default instead of keeping a stale bpm
+        SetBPM(500000);
     while (g_tempo_cursor->tick <= tick)
     {
         SetBPM(g_tempo_cursor->microsec);
@@ -214,6 +234,9 @@ void StartPlayback(int singlethread)
     SysExEvent* sysex = sysexArr;
     int64_t played = 0;
     clock_start();
+    os_timer_init();
+    if (getenv("SHARKMIDI_SPIN_US"))
+        spin_margin = atof(getenv("SHARKMIDI_SPIN_US")) * 1e-6;
     // stopping drops to 0 only after everything the stats/render side dereferences is set up
     stopping = 0;
     if (!singlethread)
@@ -221,7 +244,7 @@ void StartPlayback(int singlethread)
     while(!stopping)
     {
         int64_t clock = (int64_t)clock_getTick();
-        if (clock == current_clock) continue;
+        if (clock == current_clock) { wait_for_next_tick(clock); continue; }
         if (clock < current_clock)
         {
             while (timing > timingArr && timing->tick > clock)

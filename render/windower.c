@@ -160,7 +160,8 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
             if (stationarynotes) 
             {
                 dynascroll = 0;
-                scrollfactor = MAX((int)(WindowTicks / ppq), 1);
+                int64_t m = TimeSig_MeasureAt(current_clock); // the current window, in measures of the current time signature
+                scrollfactor = MAX((int)(WindowTicks / MAX(TimeSig_MeasureStart(m + 1) - TimeSig_MeasureStart(m), 1)), 1);
             }
         }
 
@@ -171,11 +172,12 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
         }
         if (key == GLFW_KEY_Q)
             reinitsynths();   
+        if (key == GLFW_KEY_R)
+            stopping = 1;
     }
     if (action != GLFW_RELEASE)
     {
-                if (key == GLFW_KEY_R)
-            stopping = 1;
+
         
         if (key == GLFW_KEY_RIGHT)
             clock_skip(tickscale);
@@ -332,13 +334,12 @@ void Window_Run(const char* filepath)
 
         glClear(GL_COLOR_BUFFER_BIT);
 
+        StationaryBars = MAX((int)scrollfactor, 1);
         if (midiloaded)
             Renderer_Render(current_clock, PAD);
 
         if (dynascroll)
             WindowTicks = (int)(tickscale * scrollfactor);
-        else if (stationarynotes)
-            WindowTicks = (int)(ppq * scrollfactor);
         
         UpdatePlaybackStats();
                  

@@ -115,6 +115,7 @@ int UseForceCull = 1;
 int EnableGlow = 1;
 int EnableTransparency = 0;
 int stationarynotes = 0;
+int StationaryBars = 1;
 
 static GLuint compile_stage(GLenum type, const char* src)
 {
@@ -532,10 +533,23 @@ void Renderer_Render(int32_t tick, int pad)
     if (paletteUploadPending)
         upload_palette();
 
-    // zoom keys and dynamic scroll can push this to 0 (division by zero below) or overflow int math
-    WindowTicks = MAX(1, MIN(WindowTicks, MAX_WINDOW_TICKS));
-
-    int viewStart = stationarynotes ? (tick / WindowTicks) * WindowTicks : (tick - (WindowTicks >> 1));
+    int viewStart;
+    if (stationarynotes)
+    {
+        // a page is StationaryBars whole measures, counted from measure 0, so it flips on a measure line whatever the time
+        // signature is. a signature change inside a page makes that page longer or shorter, so the window follows the page
+        int64_t bars = MAX(1, MIN(StationaryBars, 1 << 20));
+        int64_t first = (TimeSig_MeasureAt(tick) / bars) * bars;
+        int64_t pageStart = TimeSig_MeasureStart(first);
+        WindowTicks = (int)MAX(1, MIN(TimeSig_MeasureStart(first + bars) - pageStart, MAX_WINDOW_TICKS));
+        viewStart = (int)MIN(pageStart, maxTick);
+    }
+    else
+    {
+        // zoom keys and dynamic scroll can push this to 0 (division by zero below) or overflow int math
+        WindowTicks = MAX(1, MIN(WindowTicks, MAX_WINDOW_TICKS));
+        viewStart = (tick - (WindowTicks >> 1));
+    }
     viewStart = MAX(0, MIN(viewStart, maxTick));
     int viewEnd = MIN(viewStart + WindowTicks, maxTick);
 

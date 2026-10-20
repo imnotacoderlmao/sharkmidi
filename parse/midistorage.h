@@ -93,6 +93,17 @@ typedef struct
     int32_t microsec;
 } TempoEvent;
 
+// a time signature (meta event FF 58). measure and measure_ticks are filled in at load: measure is the number of the
+// measure that starts at tick, measure_ticks the length of one measure from here. there is always an entry at tick 0
+// (4/4 unless the file says otherwise)
+typedef struct
+{
+    int64_t tick;
+    int64_t measure;
+    int32_t measure_ticks;
+    uint8_t num, den_pow; // numerator, and the denominator as a power of two (2 is a quarter note)
+} TimeSigEvent;
+
 typedef struct 
 {
     int64_t tick;
@@ -106,11 +117,15 @@ extern uint8_t* eventArr;
 extern TrackGroupArr trackGroups;
 extern SysExEvent* sysexArr;
 extern TempoEvent* tempoArr;
+extern TimeSigEvent* timesigArr;
 extern uint64_t totalnotes;
 extern uint32_t tempoCount;
+extern uint32_t timesigCount;
 extern uint32_t sysexCount;
 extern uint32_t ppq;
 extern int64_t maxTick, activetickcount;
 extern const char* filename;
 extern int filename_len;
+int64_t TimeSig_MeasureAt(int64_t tick);
+int64_t TimeSig_MeasureStart(int64_t measure);
 #endif

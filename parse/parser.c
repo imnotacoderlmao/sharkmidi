@@ -84,6 +84,9 @@ typedef struct
 } Checkpoint;
 DEFINE_ARRAY(Checkpoint);
 DEFINE_ARRAY(TempoEvent);
+DEFINE_ARRAY(TimeSigEvent);
+static TimeSigEvent_arr timesigs = {0};
+static int64_t timesigs_in_file = 0; // before the default 4/4 is added
 DEFINE_ARRAY(SysExEvent);
 
 static const char* getfilename(const char* filedir) {
@@ -104,6 +107,17 @@ static const char* getfilename(const char* filedir) {
     filename[filename_len] = '\0';
     
     return filename;
+}
+
+// the name getfilename made for the loaded file. the UI thread reads `filename` without a lock, so a name is freed only
+// once a later load or unload has replaced it, never at the moment it is swapped out
+static char* owned_filename = NULL;
+static char* retired_filename = NULL;
+static void retire_filename(void)
+{
+    free(retired_filename);
+    retired_filename = owned_filename;
+    owned_filename = NULL;
 }
 
 static char static_filename_buf[512];
@@ -291,6 +305,45 @@ static int cmp_tempo(const void* a, const void* b)
     int64_t posa = ((const TempoEvent*)a)->tick;
     int64_t posb = ((const TempoEvent*)b)->tick;
     return (posa > posb) - (posa < posb);
+}
+
+static int cmp_timesig(const void* a, const void* b)
+{
+    int64_t posa = ((const TimeSigEvent*)a)->tick;
+    int64_t posb = ((const TimeSigEvent*)b)->tick;
+    return (posa > posb) - (posa < posb);
+}
+
+// sorts the signatures, makes sure there is one at tick 0, and numbers the measures. a signature that lands in the
+// middle of a measure ends that measure early, the way a player would restart the count
+static void finalize_timesigs(void)
+{
+    if (timesigs.count > 1)
+        qsort(timesigs.data, timesigs.count, sizeof(TimeSigEvent), cmp_timesig);
+    timesigs_in_file = timesigs.count;
+    if (timesigs.count == 0 || timesigs.data[0].tick > 0)
+    {
+        TimeSigEvent def = {0, 0, 0, 4, 2};
+        TimeSigEvent_arr_push(&timesigs, def);
+        memmove(timesigs.data + 1, timesigs.data, (size_t)(timesigs.count - 1) * sizeof(TimeSigEvent));
+        timesigs.data[0] = def;
+    }
+    int64_t n = 0; // two at the same tick (several tracks): the later one wins
+    for (int64_t i = 0; i < timesigs.count; i++)
+    {
+        if (n > 0 && timesigs.data[n - 1].tick == timesigs.data[i].tick) n--;
+        timesigs.data[n++] = timesigs.data[i];
+    }
+    timesigs.count = n;
+    for (int64_t i = 0; i < n; i++)
+    {
+        TimeSigEvent* e = &timesigs.data[i];
+        int64_t mt = ((int64_t)ppq * 4 * e->num) >> e->den_pow;
+        e->measure_ticks = (int32_t)(mt < 1 ? 1 : (mt > INT32_MAX ? INT32_MAX : mt));
+        if (i == 0) { e->measure = 0; continue; }
+        const TimeSigEvent* p = &timesigs.data[i - 1];
+        e->measure = p->measure + (e->tick - p->tick + p->measure_ticks - 1) / p->measure_ticks;
+    }
 }
 
 static int cmp_sysex(const void* a, const void* b)
@@ -772,6 +825,26 @@ static NOIPA int64_t ParseRange(Cursor* cur, uint8_t* trackEnd, uint8_t* msgPtr,
                                 TempoEvent_arr_push(tempo, tev);
                             }
                         }
+                        else if (readEvent == 0x58)
+                        {
+                            int64_t len = *trackPtr++;
+                            if (len >= 0x80)
+                                len = varlen_decode_slow(&len, &trackPtr);
+                            if (len > trackEnd - trackPtr)
+                            {
+                                trackPtr = trackEnd;
+                                continue;
+                            }
+                            if (store && len >= 2 && trackPtr[0] != 0 && trackPtr[1] <= 15) // numerator, power of two denominator
+                            {
+                                TimeSigEvent ts = {absolutetime, 0, 0, trackPtr[0], trackPtr[1]};
+                                #ifdef _OPENMP
+                                    #pragma omp critical
+                                #endif
+                                TimeSigEvent_arr_push(&timesigs, ts);
+                            }
+                            trackPtr += len;
+                        }
                         else if (readEvent == 0x2F)
                         {
                             trackPtr = trackEnd;
@@ -986,6 +1059,7 @@ static void printparsestatistics(void)
     "       Channel Events:     %s\n"
     "       Note ON Events:     %s\n"
     "       Tempo Events:       %s\n"
+    "       Time Signature(s):  %s\n"
     "       SysEx Events:       %s\n"
     "   Memory Usage:\n"
     "       Timing:             %s Bytes (24 bytes/entry)\n"
@@ -994,11 +1068,30 @@ static void printparsestatistics(void)
     "       Total:              %s Bytes\n"
     "===============================================\n";
 
+    char sigs[128];
+    size_t sn = 0;
+    int shown = 0;
+    int64_t changes = 0;
+    for (uint32_t i = 0; i < timesigCount; i++)
+    {
+        const TimeSigEvent* e = &timesigArr[i];
+        if (i && e->num == timesigArr[i - 1].num && e->den_pow == timesigArr[i - 1].den_pow) continue;
+        changes++;
+        if (shown < 5 && sn < sizeof(sigs) - 24)
+            sn += (size_t)snprintf(sigs + sn, sizeof(sigs) - sn, "%s%u/%u", shown++ ? ", " : "", (unsigned)e->num, 1u << e->den_pow);
+    }
+    if (changes > shown)
+        snprintf(sigs + sn, sizeof(sigs) - sn, ", ... (%lld in total)", (long long)changes);
+    else if (!timesigs_in_file)
+        snprintf(sigs + sn, sizeof(sigs) - sn, " (none in the file)");
+    if (!timesigCount)
+        snprintf(sigs, sizeof(sigs), "4/4");
+
     uint64_t trackRLEBytes = trackGroups.runs ? trackGroups.count * (sizeof(uint32_t) + sizeof(uint16_t)) + ((trackGroups.count + TG_ANCHOR - 1) / TG_ANCHOR) * sizeof(int64_t) : 0;
     printf(parsestatistics, filename, 
         AddCommas(fileLen), counttime, AddCommas((totalnotes / counttime)), tickcounttime, AddCommas((maxTick / tickcounttime)), mergetime, AddCommas((maxTick / mergetime)), parsetime,
         AddCommas((totalnotes / parsetime)), AddCommas(ppq), AddCommas(maxTick), AddCommas(activetickcount), AddCommas(trackAmount),
-        AddCommas(eventcount), AddCommas(totalnotes), AddCommas(tempoCount - 1), AddCommas(sysexCount - 1),
+        AddCommas(eventcount), AddCommas(totalnotes), AddCommas(tempoCount - 1), sigs, AddCommas(sysexCount - 1),
         AddCommas(activetickcount * sizeof(TickGroup)), AddCommas(bytecount), (double)bytecount / (double)(eventcount ? eventcount : 1),
         AddCommas(trackRLEBytes), AddCommas(trackGroups.runs ? trackGroups.count : 0),
         AddCommas((activetickcount * sizeof(TickGroup)) + bytecount + trackRLEBytes));
@@ -1575,15 +1668,20 @@ int LoadMIDI(const char* filepath)
 
     parsetime = end - start;
     qsort(tempos.data, tempos.count, sizeof(TempoEvent), cmp_tempo);
+    finalize_timesigs();
     qsort(sysexs.data, sysexs.count, sizeof(SysExEvent), cmp_sysex);
     tempoArr = tempos.data;
     sysexArr = sysexs.data;
     tempoCount = tempos.count;
+    timesigArr = timesigs.data;
+    timesigCount = (uint32_t)timesigs.count;
     sysexCount = sysexs.count;
     trackProperties_arr_free(&tracks);
     filePtr = NULL;
     midiloaded = 1;
-    filename = getfilename(filepath);
+    retire_filename();
+    owned_filename = (char*)getfilename(filepath);
+    filename = owned_filename;
     TR_LAP(tail, trmark);
     printparsestatistics();
     if (g_trace)
@@ -1602,12 +1700,14 @@ void UnloadMIDI(void)
     bytecount = 0;
     activetickcount = 0;
     filename = "no midi loaded";
+    retire_filename();
     filename_len = 0;
     
     for (uint32_t i = 0; i < sysexCount; i++)
         free(sysexArr[i].message);
     
     TempoEvent_arr_free(&tempos);
+    TimeSigEvent_arr_free(&timesigs);
     SysExEvent_arr_free(&sysexs);
     free(eventArr);
     free(timingArr);
@@ -1621,6 +1721,8 @@ void UnloadMIDI(void)
     trackGroups.count = 0;
     sysexArr = NULL;
     tempoArr = NULL;
+    timesigArr = NULL;
+    timesigCount = 0;
     eventArr = NULL;
     timingArr = NULL;
     puts("successfully freed midi");

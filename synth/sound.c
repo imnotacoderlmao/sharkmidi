@@ -1,6 +1,8 @@
 // also thank conmidi for existing
 #include "sound.h"
 #include "../playback/playback_thread.h"
+#include "../playback/timer.h"
+#include "../misc/util.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -11,14 +13,32 @@ int issynthinitiated = 0, singlethread = 0, voicefetching = 0;
 _Atomic uint32_t writeptr = 0;
 static pthread_t audio_thread;
 
+// when the ring is empty the thread sleeps until the playback thread's next tick boundary (it writes to playback_next_due that moment),
+// it wakes AUDIO_SPIN_US early and spins the rest, so events go out as they are written
 static void* audiothread(void* args)
 {
     puts("audio thread intialized");
+    os_timer_init(); // timer slack on Linux is per thread, and the Windows timer handle is per source file
     uint32_t readptr = 0;
     while (!stopping)
     {
-        // acquire pairs with the release store in StartPlayback, so the events are visible before the index is
         uint32_t wp = atomic_load_explicit(&writeptr, memory_order_acquire);
+        if (readptr == wp)
+        {
+            double now = get_time();
+            double due = atomic_load_explicit(&playback_next_due, memory_order_relaxed);
+            if (due > now)
+            {
+                double wake = due - DEFAULT_SPIN_US * 1e-6;
+                if (wake > now) 
+                    os_sleep_until(wake); 
+                else 
+                    os_cpu_relax();
+            }
+            else
+                os_sleep_until(now + DEFAULT_IDLE_US * 1e-6);
+            continue;
+        }
         while (readptr != wp && !stopping)
         {
             int32_t val = uint24_get(ringbuffer + readptr);
