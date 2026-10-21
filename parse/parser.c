@@ -1563,7 +1563,6 @@ int LoadMIDI(const char* filepath)
         TrackTick_arr_shrink(&histogram[i]); // drop the doubling slack, only tracks still being counted keep any
         ATOMIC_ADD(loadedtracks, 1);
         printf("(%s/%s) tracks scanned, %s notes counted\r", AddCommas(loadedtracks), AddCommas(trackAmount), AddCommas(totalnotes));
-        fflush(stdout);
     }
     double end = get_time();
     counttime = end - start;
@@ -1643,7 +1642,6 @@ int LoadMIDI(const char* filepath)
         TrackTick_arr_free(&histogram[i]); // memory comes back progressively, and in parallel
         ATOMIC_ADD(loadedtracks, 1);
         printf("(%s/%s) tracks parsed, %s notes parsed\r", AddCommas(loadedtracks), AddCommas(trackAmount), AddCommas(playednotes));
-        fflush(stdout);
     }
     ParseTiled(&tracks, histogram, wide, startOffsets, cps, TILE_CP_STEP, trackAmount, (int64_t)bytecount, &tempos, &sysexs);
     for (int32_t i = 0; i < trackAmount; i++)

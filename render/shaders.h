@@ -9,6 +9,8 @@
 "    int uViewEnd;\n" \
 "    int uCurrentTick;\n" \
 "    int uTransparencyEnabled;\n" \
+"    int uDepthEnabled;\n" \
+"    int uTrackCount;\n" \
 "};\n"
 
 static const char* QuadVertSrc =
@@ -27,10 +29,16 @@ FRAME_BLOCK
 "    bool isTop = ((uint(gl_VertexID) >> 1) & 1u) != 0u;\n"
 "    float x = float((bool(isEnd)? endTick : aStartTick) - uViewStart) * uMetrics.x - 1.0;\n"
 "    float y = uMetrics.y + float(((aPackedData >> 8) & 0xFFu) + uint(isTop)) * uMetrics.z;\n"
-"    vColor = texelFetch(uPalette, int(aPackedData >> 16), 0);\n"
+"    vColor = texelFetch(uPalette, int((aPackedData >> 16) & 0xFFu), 0);\n"
 "    vIsActive = (uCurrentTick >= aStartTick && uCurrentTick <= endTick) ? 1 : 0;\n"
 "    opacity = float(((aPackedData & 0xFFu) + 1u)) / 128.0;\n"
-"    gl_Position = vec4(x, y, 0, 1.0);\n"
+"    uint rank = min(((aPackedData >> 24) << 4) | ((aPackedData >> 20) & 15u), uint(uTrackCount - 1));\n"
+"    float tie = float(uint(uTrackCount - 1) - rank) / float(uTrackCount);\n"
+"    float dist = float(max(uViewEnd - aStartTick, 0)) + tie;\n"
+"    float win = float(max(uViewEnd - uViewStart, 1));\n"
+"    float t = dist <= win ? 0.9 * dist / win : 0.9 + 0.1 * log2(1.0 + dist - win) * (1.0 / 32.0);\n"
+"    float z = uDepthEnabled == 1 ? t * 2.0 - 1.0 : 0.0;\n"
+"    gl_Position = vec4(x, y, z, 1.0);\n"
 "}\n";
 
 static const char* QuadFragSrc =

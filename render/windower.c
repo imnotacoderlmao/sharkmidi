@@ -140,6 +140,11 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
             EnableGlow = !EnableGlow;
         if (key == GLFW_KEY_T)
             EnableTransparency = !EnableTransparency;
+        if (key == GLFW_KEY_O)
+        {
+            UseDepthOrder = !UseDepthOrder;
+            printf("depth ordering is %s\n", UseDepthOrder ? "TRUE" : "FALSE");
+        }
         if (key == GLFW_KEY_C)
         {
             trackcolors = !trackcolors;

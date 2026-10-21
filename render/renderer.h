@@ -17,6 +17,7 @@ extern int EnableGlow;
 extern int EnableTransparency;
 extern int UseForceCull;
 extern int stationarynotes;
+extern int UseDepthOrder;
 extern int StationaryBars; // measures per page in stationary mode
 extern int fbWidth, fbHeight;
 #endif

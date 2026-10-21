@@ -17,7 +17,7 @@ static pthread_t audio_thread;
 // it wakes AUDIO_SPIN_US early and spins the rest, so events go out as they are written
 static void* audiothread(void* args)
 {
-    puts("audio thread intialized");
+    puts("audio thread intialized\n");
     os_timer_init(); // timer slack on Linux is per thread, and the Windows timer handle is per source file
     uint32_t readptr = 0;
     while (!stopping)

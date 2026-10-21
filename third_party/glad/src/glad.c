@@ -313,6 +313,11 @@ PFNGLUNIFORM1FPROC glad_glUniform1f = NULL;
 PFNGLUNIFORM1IPROC glad_glUniform1i = NULL;
 PFNGLUNIFORM2FPROC glad_glUniform2f = NULL;
 PFNGLUNIFORM3FPROC glad_glUniform3f = NULL;
+PFNGLGETERRORPROC glad_glGetError = NULL;
+PFNGLCOPYBUFFERSUBDATAPROC glad_glCopyBufferSubData = NULL;
+PFNGLDEPTHFUNCPROC glad_glDepthFunc = NULL;
+PFNGLDRAWARRAYSINSTANCEDPROC glad_glDrawArraysInstanced = NULL;
+PFNGLDISABLEPROC glad_glDisable = NULL;
 PFNGLUNMAPBUFFERPROC glad_glUnmapBuffer = NULL;
 PFNGLUSEPROGRAMPROC glad_glUseProgram = NULL;
 PFNGLVERTEXATTRIBDIVISORPROC glad_glVertexAttribDivisor = NULL;
@@ -505,6 +510,12 @@ int gladLoadGLLoader(GLADloadproc load) {
 	load_GL_VERSION_4_0(load);
 	load_GL_VERSION_4_1(load);
 	load_GL_VERSION_4_2(load);
+
+    glad_glGetError = (PFNGLGETERRORPROC)load("glGetError");
+    glad_glCopyBufferSubData = (PFNGLCOPYBUFFERSUBDATAPROC)load("glCopyBufferSubData");
+    glad_glDepthFunc = (PFNGLDEPTHFUNCPROC)load("glDepthFunc");
+    glad_glDrawArraysInstanced = (PFNGLDRAWARRAYSINSTANCEDPROC)load("glDrawArraysInstanced");
+    glad_glDisable = (PFNGLDISABLEPROC)load("glDisable");
 
 	if (!find_extensionsGL()) return 0;
 	load_GL_ARB_buffer_storage(load);
