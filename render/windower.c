@@ -91,28 +91,6 @@ static void glfw_error_callback(int code, const char* desc)
 double delta_time = 0.0, last_time = 0.0;
 int fps = 0, vsync = 1;
 
-static void limitframerateto(int target_fps)
-{
-    if (target_fps <= 0 || target_fps > 1000) return;
-
-    static double next_frame_time = 0.0;
-    double frame_duration = 1.0 / (double)target_fps;
-    double now = get_time();
-    double remainder = next_frame_time - now;
-    if (next_frame_time == 0.0 || now > next_frame_time + (frame_duration * 4.0))
-        next_frame_time = now;
-
-    while (remainder > 0)
-    {
-        now = get_time();
-        remainder = next_frame_time - now;
-        int ms_to_sleep = (int)((remainder - 0.002) * 1000.0);
-        if (ms_to_sleep > 0)
-            os_sleep_ms(ms_to_sleep);
-    }
-    next_frame_time += frame_duration;
-}
-
 static void key_callback(GLFWwindow* w, int key, int scancode, int action, int mods)
 {
     if (action == GLFW_PRESS)
@@ -241,7 +219,7 @@ static void drop_callback(GLFWwindow* w, int count, const char** paths)
     }
 }
 
-static void fb_resize_callback(GLFWwindow* win, int width, int height)
+static void fb_resize_callback(GLFWwindow* w, int width, int height)
 {
     fbWidth = width;
     fbHeight = height;
@@ -333,7 +311,7 @@ void Window_Run(const char* filepath)
     {
         delta_time = get_time() - last_time;
         last_time += delta_time;
-        fps = (int)(1.0/delta_time);
+        fps = delta_time > 0.0 ? (int)(1.0 / delta_time) : 0;
         double alpha = 1.0 - exp(-delta_time * 2.0);
         smoothed_fps += alpha * (fps - smoothed_fps);
 

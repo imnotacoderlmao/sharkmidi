@@ -200,11 +200,11 @@ void SubmitSysEx(SysExEvent sysex)
                 os_sleep_ms(1);
         }
         if (prepare != 0 || send != 0 || unprepare != 0)
-            printf("sysex prepare,send,unprepare returned (%d,%d,%d)", prepare, send, unprepare);
+            printf("sysex prepare,send,unprepare returned (%d,%d,%d)\n", prepare, send, unprepare);
     #else
         uint32_t send = KDMAPI_SendDirectLongData(sysex.message, sysex.size);
         if (send != 0)
-            printf("sysex send returned (%d)", send);
+            printf("sysex send returned (%d)\n", send);
     #endif
 }
 

@@ -77,7 +77,7 @@ void Text_Dispose(void)
 }
 
 struct TempVert { float x, y, z; unsigned char col[4]; };
-struct TempVert tempBuf[512 * 4];
+static struct TempVert tempBuf[512 * 4];
 void Text_Queue(float x, float y, float scale, float r, float g, float b, const char* fmt, ...)
 {
     if (totalQuads >= MAX_TOTAL_QUADS) return;

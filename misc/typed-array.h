@@ -19,7 +19,7 @@ static void T##_arr_push(T##_arr* a, T item)                                 \
     }                                                                        \
     a->data[a->count++] = item;                                              \
 }                                                                            \
-__attribute__((noinline))                                                    \
+__attribute__((noinline, unused))                                            \
 static void T##_arr_free(T##_arr* a)                                         \
 {                                                                            \
     free(a->data);                                                           \

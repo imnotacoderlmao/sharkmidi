@@ -100,13 +100,12 @@ static const char* getfilename(const char* filedir) {
 
     const char* start_ptr = filedir + (i + 1);
     filename_len = strlen(start_ptr) + 1;
-    char* filename = malloc((filename_len + 1) * sizeof(char));
-    strcpy(filename, start_ptr);
-    if(filename_len > 32)
-        filename[filename_len-1] = ' ';
-    filename[filename_len] = '\0';
-    
-    return filename;
+    char* name = malloc((filename_len + 1) * sizeof(char));
+    strcpy(name, start_ptr);
+    if (filename_len > 32)
+        name[filename_len - 1] = ' ';
+    name[filename_len] = '\0';
+    return name;
 }
 
 // the name getfilename made for the loaded file. the UI thread reads `filename` without a lock, so a name is freed only
@@ -1597,12 +1596,9 @@ int LoadMIDI(const char* filepath)
     }
     TR_LAP(mainalloc, trmark);
     int merged = 0;
-    #ifndef MERGE_RANK_FORCE
-        #define MERGE_RANK_FORCE 0
-    #endif
     // the rank merge needs 4 (8 with track colors) bytes per distinct tick on top, only worth it when ticks are shared
     double mergestart = get_time();
-    if (tickbits && usedtracks >= MERGE_RANK_MIN_TRACKS && (MERGE_RANK_FORCE || activetickcount * 8 <= total_entries * 4))
+    if (tickbits && usedtracks >= MERGE_RANK_MIN_TRACKS && activetickcount * 8 <= total_entries * 4)
         merged = merge_by_rank(histogram, trackAmount, tickbits, activetickcount);
     if (!merged)
         merge_timing(histogram, trackAmount, 1);
@@ -1650,7 +1646,7 @@ int LoadMIDI(const char* filepath)
         Checkpoint_arr_free(&cps[i]);
     }
     free(cps);
-    end = get_time();    
+    end = get_time();
 
     trmark = g_trace ? get_time() : 0.0;
     free(histogram);
