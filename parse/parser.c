@@ -29,14 +29,34 @@ typedef struct
     uint32_t length;
 } trackProperties;
 
-// one tick's worth of events in one track. 16 bytes instead of the old 24, because the global
-// offset reuses the tick field once the timing merge no longer needs it
+// one tick's worth of events in one track, 8 bytes. Count stores the group the way it is usually small: the tick as
+// the distance to the track's previous group, the events (as they take space in eventArr, see Count) and the
+// note-ons in 16 bits each. a group that doesn't fit (count at 0xFFFF marks it) keeps its real values in the
+// track's TrackEsc list instead. once the merge knows where the group goes the same 8 bytes hold its offset
+// in eventArr, which is what the track parser reads
+#ifndef TT_COUNT_MAX
+#define TT_COUNT_MAX 0xFFFEu // largest count a TrackTick holds, test hook: a small value sends most groups through the escape path
+#endif
+#ifndef TT_DT_MAX
+#define TT_DT_MAX 0xFFFFFFFFull // largest tick distance a TrackTick holds
+#endif
+typedef union
+{
+    struct
+    {
+        uint32_t dtick;
+        uint16_t count;
+        uint16_t notes;
+    };
+    int64_t offset;
+} TrackTick;
 typedef struct
 {
-    union { int64_t tick; int64_t offset; };
-    uint32_t count;     // events in the group
-    uint32_t notecount; // note-ons in the group
-} TrackTick;
+    int64_t idx;    // group index within the track
+    int64_t tick;   // absolute
+    uint32_t count;
+    uint32_t notes;
+} TrackEsc;
 
 static uint8_t* filePtr = NULL;
 static uint64_t fileLen = 0;
@@ -70,6 +90,8 @@ static int env_flag(const char* name)
 
 DEFINE_ARRAY(trackProperties);
 DEFINE_ARRAY(TrackTick);
+DEFINE_ARRAY(TrackEsc);
+static TrackEsc_arr* g_esc = NULL; // per track, the groups TrackTick can not hold, until the merge is done
 
 // where a track can be picked up again without reading it from the start: every TILE_CP_STEP groups, Count notes
 // the byte position (relative to the track start), the absolute tick and the running status. checkpoint c (1 based)
@@ -360,6 +382,12 @@ static int cmp_sysex(const void* a, const void* b)
     #define NOIPA __attribute__((noinline))
 #endif
 
+__attribute__((noinline, cold))
+static void tt_esc_push(TrackEsc_arr* a, int64_t idx, int64_t tick, uint32_t count, uint32_t notes)
+{
+    TrackEsc_arr_push(a, (TrackEsc){idx, tick, count, notes});
+}
+
 // cold path of the group array growth (same policy as TrackTick_arr_push)
 __attribute__((noinline, cold))
 static void tg_grow(TrackTick_arr* a)
@@ -403,7 +431,8 @@ static inline __attribute__((always_inline)) uint32_t rsb_key(uint32_t st, uint3
 
 // cps / cpstep: checkpoints every cpstep groups are appended to cps. cpstep 0 records none.
 // returns the number of channel events, *bytes_out gets the bytes they take
-static NOIPA int64_t CountTrackEvents(uint8_t* trackPtr, uint8_t* trackEnd, TrackTick_arr* tickgroup, Checkpoint_arr* cps, int64_t cpstep, int64_t* bytes_out)
+static void tt_esc_push(TrackEsc_arr* a, int64_t idx, int64_t tick, uint32_t count, uint32_t notes);
+static NOIPA int64_t CountTrackEvents(uint8_t* trackPtr, uint8_t* trackEnd, TrackTick_arr* tickgroup, TrackEsc_arr* esc, Checkpoint_arr* cps, int64_t cpstep, int64_t* bytes_out)
 {
     const uint8_t* trackBase = trackPtr;
     int64_t nextcp = cpstep > 0 ? cpstep : INT64_MAX;
@@ -414,6 +443,7 @@ static NOIPA int64_t CountTrackEvents(uint8_t* trackPtr, uint8_t* trackEnd, Trac
     int64_t eventcount_local = 0;
     int64_t bytes_local = 0;
     int64_t absolutetime = 0;
+    int64_t prevtick = 0;           // tick of the last closed group
     uint8_t prevEvent = 0;
     uint32_t count = 0;
     uint32_t notecount = 0;
@@ -423,6 +453,21 @@ static NOIPA int64_t CountTrackEvents(uint8_t* trackPtr, uint8_t* trackEnd, Trac
     TrackTick* data = tickgroup->data;
     int64_t n = tickgroup->count, cap = tickgroup->cap;
     #define TG_ENSURE() do { if (UNLIKELY(n >= cap)) { tickgroup->count = n; tg_grow(tickgroup); data = tickgroup->data; cap = tickgroup->cap; } } while (0)
+    // closes the open group (the plain, branching version of what the fast loop does inline)
+    #define TG_CLOSE() do { \
+        TG_ENSURE(); \
+        uint32_t gc_ = count + 2 * runs; \
+        uint64_t dt_ = (uint64_t)(absolutetime - prevtick); \
+        if (UNLIKELY(gc_ > TT_COUNT_MAX || dt_ > TT_DT_MAX)) \
+        { \
+            tt_esc_push(esc, n, absolutetime, gc_, notecount); \
+            data[n] = (TrackTick){.dtick = 0, .count = 0xFFFF, .notes = 0}; \
+        } \
+        else \
+            data[n] = (TrackTick){.dtick = (uint32_t)dt_, .count = (uint16_t)gc_, .notes = (uint16_t)notecount}; \
+        n++; \
+        prevtick = absolutetime; \
+    } while (0)
 
     while (trackPtr < trackEnd)
     {
@@ -437,8 +482,14 @@ static NOIPA int64_t CountTrackEvents(uint8_t* trackPtr, uint8_t* trackEnd, Trac
             // close the current group when time advances, without a branch: the slot is always written,
             // the index only moves if the group really ended
             TG_ENSURE();
-            data[n] = (TrackTick){.tick = absolutetime, .count = count + 2 * runs, .notecount = notecount};
+            uint32_t gcount = count + 2 * runs;
+            uint64_t gdt = (uint64_t)(absolutetime - prevtick);
+            uint32_t gesc = (gcount > TT_COUNT_MAX) | (gdt > TT_DT_MAX);
+            data[n] = (TrackTick){.dtick = (uint32_t)gdt, .count = (uint16_t)(gesc ? 0xFFFFu : gcount), .notes = (uint16_t)notecount};
             uint32_t flush = (delta != 0) & (count != 0);
+            if (UNLIKELY(flush & gesc))
+                tt_esc_push(esc, n, absolutetime, gcount, notecount);
+            prevtick = flush ? absolutetime : prevtick;
             uint32_t keep = flush - 1;
             n += flush;
             eventcount_local += count & ~keep;
@@ -483,8 +534,7 @@ static NOIPA int64_t CountTrackEvents(uint8_t* trackPtr, uint8_t* trackEnd, Trac
         {
             if (count > 0)
             {
-                TG_ENSURE();
-                data[n++] = (TrackTick){.tick = absolutetime, .count = count + 2 * runs, .notecount = notecount};
+                TG_CLOSE();
                 eventcount_local += count;
                 bytes_local += count + 2 * runs;
                 totalnotes_local += notecount;
@@ -566,8 +616,7 @@ finalize:;
         maxTick = absolutetime;
     if (count > 0)
     {
-        TG_ENSURE();
-        data[n++] = (TrackTick){.tick = absolutetime, .count = count + 2 * runs, .notecount = notecount};
+        TG_CLOSE();
         eventcount_local += count;
         bytes_local += count + 2 * runs;
         totalnotes_local += notecount;
@@ -578,6 +627,7 @@ finalize:;
     return eventcount_local;
     #undef CP_CHECK
     #undef TG_ENSURE
+    #undef TG_CLOSE
 }
 
 // writes one event of the open group. a different key than the last event's closes that run (its last note byte
@@ -1156,6 +1206,88 @@ static void merge_sift_down(MergeNode* heap, int64_t n, int64_t i)
     heap[i] = node;
 }
 
+// walks the groups of a track in order. a position (TTPos) can be kept and resumed
+typedef struct { int64_t j, tick, ei; } TTPos; // next group, tick of the group before it, next escape
+typedef struct
+{
+    const TrackTick* d;
+    const TrackEsc* e;
+    TTPos p;
+    int64_t tick; // the group tt_next decoded last
+    uint32_t count, notes;
+} TTIter;
+
+static inline void tt_open(TTIter* it, const TrackTick_arr* h, const TrackEsc_arr* e)
+{
+    it->d = h->data;
+    it->e = e->data;
+    it->p = (TTPos){0, 0, 0};
+}
+
+// decodes group p.j into tick / count / notes and steps to the next
+static inline __attribute__((always_inline)) void tt_next(TTIter* it)
+{
+    TrackTick g = it->d[it->p.j++];
+    if (UNLIKELY(g.count == 0xFFFF))
+    {
+        const TrackEsc* e = &it->e[it->p.ei++];
+        it->p.tick = e->tick;
+        it->count = e->count;
+        it->notes = e->notes;
+    }
+    else
+    {
+        it->p.tick += g.dtick;
+        it->count = g.count;
+        it->notes = g.notes;
+    }
+    it->tick = it->p.tick;
+}
+
+// what compact_offsets needs to know about a track once its groups have their offsets: where the first one is,
+// whether the groups lie back to back, and the longest distance from one group to the next
+typedef struct
+{
+    int64_t first, last, maxgap, n;
+    uint32_t lastcount;
+    uint8_t contig;
+} TrackShape;
+static TrackShape* g_shape = NULL;
+
+static inline void shape_add(TrackShape* s, int64_t offset, uint32_t count)
+{
+    if (s->n == 0)
+    {
+        s->first = offset;
+        s->contig = 1;
+        s->maxgap = 0;
+    }
+    else
+    {
+        int64_t gap = offset - s->last;
+        if (gap != (int64_t)s->lastcount) s->contig = 0;
+        if (gap > s->maxgap) s->maxgap = gap;
+    }
+    s->last = offset;
+    s->lastcount = count;
+    s->n++;
+}
+
+// appends the shape of the groups that follow a's
+static void shape_join(TrackShape* a, const TrackShape* b)
+{
+    if (b->n == 0) return;
+    if (a->n == 0) { *a = *b; return; }
+    int64_t gap = b->first - a->last;
+    if (gap != (int64_t)a->lastcount) a->contig = 0;
+    a->contig &= b->contig;
+    if (gap > a->maxgap) a->maxgap = gap;
+    if (b->maxgap > a->maxgap) a->maxgap = b->maxgap;
+    a->last = b->last;
+    a->lastcount = b->lastcount;
+    a->n += b->n;
+}
+
 typedef struct
 {
     int64_t curtick; // tick of the timing entry being built, -1 before the first
@@ -1186,24 +1318,25 @@ static void tg_drop(const char* why)
     trackGroups.count = 0;
 }
 
-static inline void merge_emit(MergeState* m, TrackTick* g, uint32_t track, int fill)
+static inline void merge_emit(MergeState* m, int64_t tick, uint32_t count, uint32_t notes, TrackTick* slot, uint32_t track, int fill)
 {
-    if (g->tick != m->curtick)
+    if (tick != m->curtick)
     {
-        m->curtick = g->tick;
+        m->curtick = tick;
         m->out++;
         if (fill)
             timingArr[m->out] = (TickGroup){.tick = m->curtick, .notecount = m->notes, .event_offset = m->offset};
     }
     if (fill)
     {
-        timingArr[m->out].notecount += g->notecount;
+        timingArr[m->out].notecount += notes;
         if (trackGroups.runs)
-            tg_put(m->entry, m->offset, g->count, track);
-        g->offset = m->offset; // the track parser reads its write position from here
+            tg_put(m->entry, m->offset, count, track);
+        slot->offset = m->offset; // the track parser reads its write position from here
+        shape_add(&g_shape[track], m->offset, count);
     }
-    m->notes += g->notecount;
-    m->offset += g->count;
+    m->notes += notes;
+    m->offset += count;
     m->entry++;
 }
 
@@ -1214,21 +1347,28 @@ static int64_t merge_timing(TrackTick_arr* hist, int32_t tracks, int fill)
 {
     MergeState m = {.curtick = -1, .out = -1};
     MergeNode* heap = malloc((tracks + 1) * sizeof(MergeNode));
-    int64_t* pos = calloc(tracks + 1, sizeof(int64_t));
+    TTIter* its = calloc(tracks + 1, sizeof(TTIter));
     int64_t n = 0;
     for (int32_t t = 0; t < tracks; t++)
         if (hist[t].count > 0)
-            heap[n++] = (MergeNode){hist[t].data[0].tick, (uint32_t)t};
+        {
+            tt_open(&its[t], &hist[t], &g_esc[t]);
+            tt_next(&its[t]);
+            heap[n++] = (MergeNode){its[t].tick, (uint32_t)t};
+        }
     for (int64_t i = n / 2 - 1; i >= 0; i--)
         merge_sift_down(heap, n, i);
 
     while (n > 1)
     {
         uint32_t t = heap[0].track;
-        TrackTick* g = &hist[t].data[pos[t]];
-        merge_emit(&m, g, t, fill);
-        if (++pos[t] < hist[t].count)
-            heap[0].tick = g[1].tick;
+        TTIter* it = &its[t];
+        merge_emit(&m, it->tick, it->count, it->notes, &hist[t].data[it->p.j - 1], t, fill);
+        if (it->p.j < hist[t].count)
+        {
+            tt_next(it);
+            heap[0].tick = it->tick;
+        }
         else
             heap[0] = heap[--n];
         merge_sift_down(heap, n, 0);
@@ -1236,11 +1376,16 @@ static int64_t merge_timing(TrackTick_arr* hist, int32_t tracks, int fill)
     if (n == 1) // one track left (or only ever one): plain walk, no heap
     {
         uint32_t t = heap[0].track;
-        for (int64_t j = pos[t]; j < hist[t].count; j++)
-            merge_emit(&m, &hist[t].data[j], t, fill);
+        TTIter* it = &its[t];
+        for (;;)
+        {
+            merge_emit(&m, it->tick, it->count, it->notes, &hist[t].data[it->p.j - 1], t, fill);
+            if (it->p.j >= hist[t].count) break;
+            tt_next(it);
+        }
     }
     free(heap);
-    free(pos);
+    free(its);
     return m.out + 1;
 }
 
@@ -1265,14 +1410,19 @@ static int64_t count_distinct_ticks(TrackTick_arr* hist, int32_t tracks, int64_t
         #pragma omp parallel for schedule(dynamic, 1)
     #endif
     for (int32_t t = 0; t < tracks; t++)
+    {
+        TTIter it;
+        tt_open(&it, &hist[t], &g_esc[t]);
         for (int64_t j = 0; j < hist[t].count; j++)
         {
-            int64_t tick = hist[t].data[j].tick;
+            tt_next(&it);
+            int64_t tick = it.tick;
             uint64_t mask = 1ull << (tick & 63);
             // most ticks are already marked by another track, a plain read keeps the cache line shared
             if (!(__atomic_load_n(&bits[tick >> 6], __ATOMIC_RELAXED) & mask))
                 __atomic_fetch_or(&bits[tick >> 6], mask, __ATOMIC_RELAXED);
         }
+    }
     int64_t distinct = 0;
     for (int64_t w = 0; w < words; w++)
         distinct += __builtin_popcountll(bits[w]);
@@ -1324,9 +1474,11 @@ static int merge_by_rank(TrackTick_arr* hist, int32_t tracks, const uint64_t* bi
     uint32_t* ecur = trackGroups.runs ? calloc(distinct, sizeof(uint32_t)) : NULL; // next group index on each tick
     int64_t* tickbound = malloc((chunks + 1) * sizeof(int64_t));
     int64_t* bnd = malloc((size_t)tracks * (chunks + 1) * sizeof(int64_t));
-    if (!wprefix || !evcur || (trackGroups.runs && !ecur) || !tickbound || !bnd)
+    TTPos* pos = malloc((size_t)tracks * (chunks + 1) * sizeof(TTPos));        // where every (track, range) starts
+    TrackShape* part = calloc((size_t)tracks * chunks, sizeof(TrackShape));  // shape of every (track, range)
+    if (!wprefix || !evcur || (trackGroups.runs && !ecur) || !tickbound || !bnd || !pos || !part)
     {
-        free(wprefix); free(evcur); free(ecur); free(tickbound); free(bnd);
+        free(wprefix); free(evcur); free(ecur); free(tickbound); free(bnd); free(pos); free(part);
         return 0;
     }
     TR_LAP(rank_alloc, trm);
@@ -1349,19 +1501,23 @@ static int merge_by_rank(TrackTick_arr* hist, int32_t tracks, const uint64_t* bi
     #endif
     for (int32_t t = 0; t < tracks; t++)
     {
-        const TrackTick* d = hist[t].data;
-        int64_t n = hist[t].count, lo = 0;
+        TTIter it;
+        tt_open(&it, &hist[t], &g_esc[t]);
+        int64_t n = hist[t].count;
         int64_t* b = &bnd[(size_t)t * (chunks + 1)];
+        TTPos* ps = &pos[(size_t)t * (chunks + 1)];
         b[0] = 0;
+        ps[0] = it.p;
         for (int c = 1; c < chunks; c++)
         {
-            int64_t hi = n;
-            while (lo < hi)
+            while (it.p.j < n)
             {
-                int64_t mid = lo + (hi - lo) / 2;
-                if (d[mid].tick < tickbound[c]) lo = mid + 1; else hi = mid;
+                TTPos save = it.p;
+                tt_next(&it);
+                if (it.tick >= tickbound[c]) { it.p = save; break; }
             }
-            b[c] = lo;
+            b[c] = it.p.j;
+            ps[c] = it.p;
         }
         b[chunks] = n;
     }
@@ -1375,14 +1531,17 @@ static int merge_by_rank(TrackTick_arr* hist, int32_t tracks, const uint64_t* bi
     for (int c = 0; c < chunks; c++)
         for (int32_t t = 0; t < tracks; t++)
         {
-            const TrackTick* d = hist[t].data;
             const int64_t* b = &bnd[(size_t)t * (chunks + 1)];
+            TTIter it;
+            tt_open(&it, &hist[t], &g_esc[t]);
+            it.p = pos[(size_t)t * (chunks + 1) + c];
             for (int64_t j = b[c]; j < b[c + 1]; j++)
             {
-                int64_t r = tick_rank(bits, wprefix, d[j].tick);
-                timingArr[r].tick = d[j].tick;
-                timingArr[r].event_offset += d[j].count; // totals for now, turned into start offsets below
-                timingArr[r].notecount += d[j].notecount;
+                tt_next(&it);
+                int64_t r = tick_rank(bits, wprefix, it.tick);
+                timingArr[r].tick = it.tick;
+                timingArr[r].event_offset += it.count; // totals for now, turned into start offsets below
+                timingArr[r].notecount += it.notes;
                 if (ecur) ecur[r]++;
             }
         }
@@ -1418,25 +1577,40 @@ static int merge_by_rank(TrackTick_arr* hist, int32_t tracks, const uint64_t* bi
         {
             TrackTick* d = hist[t].data;
             const int64_t* b = &bnd[(size_t)t * (chunks + 1)];
+            TrackShape* sp = &part[(size_t)t * chunks + c];
+            TTIter it;
+            tt_open(&it, &hist[t], &g_esc[t]);
+            it.p = pos[(size_t)t * (chunks + 1) + c];
             for (int64_t j = b[c]; j < b[c + 1]; j++)
             {
-                int64_t r = tick_rank(bits, wprefix, d[j].tick);
+                tt_next(&it); // reads group j, which is only overwritten below
+                int64_t r = tick_rank(bits, wprefix, it.tick);
                 int64_t offset = timingArr[r].event_offset + evcur[r];
-                evcur[r] += d[j].count;
+                evcur[r] += it.count;
                 if (ecur)
-                    tg_put(ecur[r]++, offset, d[j].count, t);
+                    tg_put(ecur[r]++, offset, it.count, t);
                 d[j].offset = offset; // the track parser reads its write position from here
+                shape_add(sp, offset, it.count);
             }
         }
+    #ifdef _OPENMP
+        #pragma omp parallel for schedule(dynamic, 1)
+    #endif
+    for (int32_t t = 0; t < tracks; t++)
+    {
+        g_shape[t] = (TrackShape){0};
+        for (int c = 0; c < chunks; c++)
+            shape_join(&g_shape[t], &part[(size_t)t * chunks + c]);
+    }
 
     TR_LAP(rank_pass2, trm);
-    free(wprefix); free(evcur); free(ecur); free(tickbound); free(bnd);
+    free(wprefix); free(evcur); free(ecur); free(tickbound); free(bnd); free(pos); free(part);
     TR_LAP(rank_free, trm);
     tr.rank_used = 1;
     return 1;
 }
 
-// parsing needs each group's start offset in eventArr, so squeeze the 16 byte groups down in place: a 4 byte
+// parsing needs each group's start offset in eventArr, so squeeze the 8 byte groups down in place: a 4 byte
 // distance to the next group's start per group (the first start goes to *start). a track whose groups end up
 // back to back (nothing from another track lands between them, always true for a single track file) doesn't
 // need them at all: only its first offset is kept and the array is released. a gap of 4 GB or more, which takes
@@ -1448,25 +1622,15 @@ static void compact_offsets(TrackTick_arr* a, int64_t* start, uint8_t* wide, Che
 {
     *start = 0;
     *wide = 0;
+    TrackEsc_arr_free(&g_esc[idx]); // the merge is done with it
     if (a->count == 0)
         return;
     TrackTick* src = a->data;
     *start = src[0].offset;
-    int contiguous = 1;
-    int64_t maxgap = 0;
     // the gaps can't reach 4G when the whole file has fewer events than that, then the scan may stop early
     int needgap = bytecount >= (uint64_t)UINT32_MAX;
-    for (int64_t j = 0; j + 1 < a->count; j++)
-    {
-        int64_t gap = src[j + 1].offset - src[j].offset;
-        if (gap != (int64_t)src[j].count)
-        {
-            contiguous = 0;
-            if (!needgap)
-                break;
-        }
-        if (gap > maxgap) maxgap = gap;
-    }
+    int contiguous = g_shape[idx].contig;
+    int64_t maxgap = g_shape[idx].maxgap;
     if (contiguous)
     {
         free(a->data);
@@ -1479,7 +1643,7 @@ static void compact_offsets(TrackTick_arr* a, int64_t* start, uint8_t* wide, Che
     for (int64_t c = 0; c < ncp; c++)
         cps->data[c].off = INT64_MAX; // a checkpoint at a group that doesn't exist (the end of the track) is never used
     // the table is written over the TrackTicks it is made from, which is safe: entry j is only written after
-    // the groups up to j + 1 were read, and an entry (4 or 8 bytes) is smaller than a TrackTick
+    // the groups up to j + 1 were read, and an entry (4 or 8 bytes) is not larger than a TrackTick
     int64_t cur = src[0].offset;
     if (usewide)
     {
@@ -1543,6 +1707,8 @@ int LoadMIDI(const char* filepath)
     updatestatsandprint("\ncounting events\n");
 
     TrackTick_arr* histogram = calloc(trackAmount, sizeof(TrackTick_arr));
+    g_esc = calloc(trackAmount + 1, sizeof(TrackEsc_arr));
+    g_shape = calloc(trackAmount + 1, sizeof(TrackShape));
     Checkpoint_arr* cps = calloc(trackAmount + 1, sizeof(Checkpoint_arr));
     double start = get_time();
     int32_t loadedtracks = 0;
@@ -1555,10 +1721,11 @@ int LoadMIDI(const char* filepath)
         trackProperties* currtrack = &tracks.data[i];
         uint8_t* trackstart = filePtr + currtrack->start;
         int64_t trackbytes = 0;
-        int64_t trackev = CountTrackEvents(trackstart, trackstart + currtrack->length, &histogram[i], &cps[i], TILE_CP_STEP, &trackbytes); // checkpoint positions are 32 bit, like a track chunk length
+        int64_t trackev = CountTrackEvents(trackstart, trackstart + currtrack->length, &histogram[i], &g_esc[i], &cps[i], TILE_CP_STEP, &trackbytes); // checkpoint positions are 32 bit, like a track chunk length
         Checkpoint_arr_shrink(&cps[i]);
         ATOMIC_ADD(eventcount, trackev);
         ATOMIC_ADD(bytecount, trackbytes);
+        TrackEsc_arr_shrink(&g_esc[i]);
         TrackTick_arr_shrink(&histogram[i]); // drop the doubling slack, only tracks still being counted keep any
         ATOMIC_ADD(loadedtracks, 1);
         printf("(%s/%s) tracks scanned, %s notes counted\r", AddCommas(loadedtracks), AddCommas(trackAmount), AddCommas(totalnotes));
@@ -1650,6 +1817,8 @@ int LoadMIDI(const char* filepath)
 
     trmark = g_trace ? get_time() : 0.0;
     free(histogram);
+    free(g_esc); g_esc = NULL;
+    free(g_shape); g_shape = NULL;
     free(startOffsets);
     free(wide);
     munmap(filePtr, fileLen);

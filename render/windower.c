@@ -121,7 +121,7 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
         if (key == GLFW_KEY_O)
         {
             UseDepthOrder = !UseDepthOrder;
-            printf("depth ordering is %s\n", UseDepthOrder ? "TRUE" : "FALSE");
+            printf("track ordering is %s\n", UseDepthOrder ? "TRUE" : "FALSE");
         }
         if (key == GLFW_KEY_C)
         {
@@ -291,6 +291,7 @@ int Window_Init(void)
 
 void Window_Run(const char* filepath)
 {
+    Renderer_SetProcLoader((void* (*)(const char*))glfwGetProcAddress);
     Renderer_Init();
     Text_Init();
     if (filepath != NULL && LoadMIDI(filepath))

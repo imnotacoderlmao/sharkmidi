@@ -15,9 +15,9 @@
 
 static const char* QuadVertSrc =
 "#version 420 core\n"
-"in int aStartTick;\n"
-"in int aEndTick;\n"
-"in uint aPackedData;\n"
+"layout(location = 0) in int aStartTick;\n"
+"layout(location = 1) in int aEndTick;\n"
+"layout(location = 2) in uint aPackedData;\n"
 FRAME_BLOCK
 "uniform sampler1D uPalette;\n"
 "flat out vec4 vColor;\n"
@@ -34,10 +34,7 @@ FRAME_BLOCK
 "    opacity = float(((aPackedData & 0xFFu) + 1u)) / 128.0;\n"
 "    uint rank = min(((aPackedData >> 24) << 4) | ((aPackedData >> 20) & 15u), uint(uTrackCount - 1));\n"
 "    float tie = float(uint(uTrackCount - 1) - rank) / float(uTrackCount);\n"
-"    float dist = float(max(uViewEnd - aStartTick, 0)) + tie;\n"
-"    float win = float(max(uViewEnd - uViewStart, 1));\n"
-"    float t = dist <= win ? 0.9 * dist / win : 0.9 + 0.1 * log2(1.0 + dist - win) * (1.0 / 32.0);\n"
-"    float z = uDepthEnabled == 1 ? t * 2.0 - 1.0 : 0.0;\n"
+"    float z = uDepthEnabled == 1 ? tie * 2.0 - 1.0 : 0.0; // track priority: the higher track in front\n"
 "    gl_Position = vec4(x, y, z, 1.0);\n"
 "}\n";
 
@@ -54,6 +51,21 @@ FRAME_BLOCK
 "    color = (uGlowEnabled == 1 && vIsActive == 1) ? min(color * 2.0 + 0.1, vec3(1.0)) : color;\n"
 "    fragColor = vec4(color, note_opacity);\n"
 "}\n";
+
+// writes the end ticks of notes into the buffer of the notes, one point per patch: aWord is where the EndTick is, in words
+static const char* ScatterVertSrc =
+"#version 420 core\n"
+"layout(location = 0) in uint aWord;\n"
+"layout(location = 1) in uint aEnd;\n"
+"layout(r32ui, binding = 0) uniform writeonly uimageBuffer uRing;\n"
+"void main() {\n"
+"    imageStore(uRing, int(aWord), uvec4(aEnd));\n"
+"    gl_Position = vec4(0.0);\n"
+"}\n";
+
+static const char* ScatterFragSrc =
+"#version 420 core\n"
+"void main() {}\n";
 
 static const char* CursorVertSrc =
 "#version 420 core\n"

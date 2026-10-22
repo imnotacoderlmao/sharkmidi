@@ -30,7 +30,7 @@ typedef struct {
 } FrameUniforms;
 
 typedef struct { 
-    int32_t openIdx; // while count > 0: this note's slot in openNotes
+    uint32_t slot;   // while count > 0: the number of this note in the pages (low 32 bits, see close_note)
     int32_t count; 
 } KeyHeader;
 
@@ -38,30 +38,39 @@ typedef struct {
 
 static GLuint quadShader, cursorShader, frameUBO;
 static GLint uc_cursorX, uc_halfWidth, uc_yBottom, uc_yTop, uc_lineColor;
-static GLuint vao, cursorVAO, vboBuffer, paletteTex, openVao, openVbo;
+static GLuint vao, cursorVAO, vboBuffer, paletteTex, ringTex, patchVbo, patchVao, scatterShader;
 
-// notes live in two places. a note that is sounding (its note off has not come) is in openNotes, a small array that is
-// drawn from every frame with its end at the right edge. once the note off comes it is moved into the ring, which is a
-// buffer in video memory the CPU only writes to: notes go in when they end, so the ring is in the order of end ticks,
-// and its front can be dropped a chunk at a time with a small table (chunkEnd) instead of reading the notes back
+// the notes are in video memory in pages of PAGE_NOTES, which the CPU only writes to (glBufferSubData). a note goes into the
+// next slot of the newest page when its note on is met, with EndTick 0 (still sounding, the shader draws it to the right
+// edge), so the pages are in start order, and for notes of the same tick in the order of the tracks, which is the order
+// the events are in: drawing them in page order puts the later start on top, no depth needed. the end is filled in when
+// the note off comes: a note still in the batch gets it there, one that is in video memory goes in a patch list that a
+// vertex shader writes into the buffer in one draw (flush_patches), so nothing is read back or mapped. a page is freed
+// when none of its notes is sounding and all have ended left of the view, so a stuck note only keeps its own page. free
+// pages are reused oldest first, which keeps the live pages mostly in one piece for the draw
 #ifndef RENDER_RING_MIN
 #define RENDER_RING_MIN (1 << 20)
 #endif
 #define BATCH_NOTES (1 << 16)
-#define CHUNK_SHIFT 12
-static RenderNote batch[BATCH_NOTES]; // ended notes on their way to the ring
+#define PAGE_SHIFT 12
+#define PAGE_NOTES (1 << PAGE_SHIFT)
+#define PAGE_MASK (PAGE_NOTES - 1)
+#define MAX_POOL_PAGES (1 << 17)      // 2^29 notes
+static RenderNote batch[BATCH_NOTES]; // new notes on their way to video memory, the last batchN notes before noteHead
 static int batchN;
-static RenderNote* openNotes;
-static KeyHeader** openOwner;         // the key header of each open note
-static int openCount, openCap;
-static int openVboCap;
-static int ringCapacity = RENDER_RING_MIN;
+typedef struct { int32_t phys; int32_t open; int32_t maxEnd; } PageInfo; // phys -1: freed
+static PageInfo* pages;               // pages[i] is the page numbered pageOrigin + i, entries before pageLo are freed
+static int64_t pageOrigin, pageLo, pageHi, pageCap, livePages;
+static int64_t noteHead;              // number of the next note, a note's page is its number >> PAGE_SHIFT
+static int poolPages;                 // pages the video memory buffer has room for
+static int growFailed;
 static int deferredRingCap = -1;
-static int mask;
-static int64_t ringHead, ringTail;    // absolute note numbers, the place in the buffer is the number & mask
-static int32_t* chunkEnd;             // for each chunk of the ring: the end tick of the last note stored in it
-static int chunkMask;
-static int ringGrowFailed;
+static int freeQ[MAX_POOL_PAGES], freeHead, freeCount; // free physical pages, oldest first
+typedef struct { uint32_t word, end; } Patch; // word: where the EndTick is in the buffer, in 32 bit words
+static Patch* patches;
+static int64_t patchN, patchCap;
+static int scatterOk;
+static int64_t scatterWords;          // how much of the buffer the texture buffer view of the scatter reaches
 
 static int paletteUploadPending = 0;
 
@@ -139,9 +148,10 @@ int UseForceCull = 1;
 int EnableGlow = 1;
 int EnableTransparency = 0;
 int stationarynotes = 0;
-int UseDepthOrder = 1;
+int UseDepthOrder = 0; // 1: track priority, the higher track in front whatever the start. 0: start order, from the pages
 int StationaryBars = 1;
 
+static int shaderQuiet; // a failure returns 0 instead of ending the program
 static GLuint compile_stage(GLenum type, const char* src)
 {
     GLuint shader = glCreateShader(type);
@@ -154,7 +164,9 @@ static GLuint compile_stage(GLenum type, const char* src)
         char log[2048];
         glGetShaderInfoLog(shader, sizeof(log), NULL, log);
         fprintf(stderr, "shader compile error:\n%s\n", log);
-        exit(1);
+        if (!shaderQuiet) exit(1);
+        glDeleteShader(shader);
+        return 0;
     }
     return shader;
 }
@@ -163,6 +175,12 @@ GLuint build_shader(const char* vert, const char* frag)
 {
     GLuint v = compile_stage(GL_VERTEX_SHADER, vert);
     GLuint f = compile_stage(GL_FRAGMENT_SHADER, frag);
+    if (!v || !f)
+    {
+        if (v) glDeleteShader(v);
+        if (f) glDeleteShader(f);
+        return 0;
+    }
     GLuint prog = glCreateProgram();
     glAttachShader(prog, v);
     glAttachShader(prog, f);
@@ -174,15 +192,16 @@ GLuint build_shader(const char* vert, const char* frag)
         char log[2048];
         glGetProgramInfoLog(prog, sizeof(log), NULL, log);
         fprintf(stderr, "shader link error:\n%s\n", log);
-        exit(1);
+        if (!shaderQuiet) exit(1);
+        glDeleteShader(v);
+        glDeleteShader(f);
+        glDeleteProgram(prog);
+        return 0;
     }
     glDeleteShader(v);
     glDeleteShader(f);
     return prog;
 }
-
-static const GLbitfield storageFlags = GL_MAP_WRITE_BIT | GL_MAP_READ_BIT |
-    GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT;
 
 static void bind_vertex_attribs(GLuint array, GLuint buffer)
 {
@@ -205,106 +224,271 @@ static void bind_vertex_attribs(GLuint array, GLuint buffer)
     glBindBuffer(GL_ARRAY_BUFFER, 0);
 }
 
-// a new ring of newCap notes (a power of two, at least one chunk), the notes in the old one are copied over on the GPU.
-// returns 0, and changes nothing, when there is no memory for it
-static int gpu_ring_resize(int newCap)
+// ---- loader ---------------------------------------------------------------------------------------------------
+// the scatter needs glBindImageTexture and glMemoryBarrier (4.2) and, for a buffer bigger than one texture buffer can
+// reach, glTexBufferRange (4.3). the glad of the project may not have them, so they come through the loader given to
+// Renderer_SetProcLoader (glfwGetProcAddress), call it before Renderer_Init. without them the patches are written one
+// glBufferSubData at a time, which is correct but slow
+typedef void (*ScBindImageTexture)(GLuint, GLuint, GLint, GLboolean, GLint, GLenum, GLenum);
+typedef void (*ScMemoryBarrier)(GLbitfield);
+typedef void (*ScTexBufferRange)(GLenum, GLenum, GLuint, GLintptr, GLsizeiptr);
+static void* (*procLoader)(const char*);
+static ScBindImageTexture scBindImageTexture;
+static ScMemoryBarrier scMemoryBarrier;
+static ScTexBufferRange scTexBufferRange;
+#ifndef GL_VERTEX_ATTRIB_ARRAY_BARRIER_BIT
+#define GL_VERTEX_ATTRIB_ARRAY_BARRIER_BIT 0x00000001
+#endif
+#ifndef GL_BUFFER_UPDATE_BARRIER_BIT
+#define GL_BUFFER_UPDATE_BARRIER_BIT 0x00000200
+#endif
+
+void Renderer_SetProcLoader(void* (*loader)(const char*))
+{
+    procLoader = loader;
+}
+
+static void scatter_init(void)
+{
+    if (!procLoader) return;
+    scBindImageTexture = (ScBindImageTexture)procLoader("glBindImageTexture");
+    scMemoryBarrier = (ScMemoryBarrier)procLoader("glMemoryBarrier");
+    scTexBufferRange = (ScTexBufferRange)procLoader("glTexBufferRange");
+    if (!scBindImageTexture || !scMemoryBarrier) return;
+    shaderQuiet = 1;
+    scatterShader = build_shader(ScatterVertSrc, ScatterFragSrc);
+    shaderQuiet = 0;
+    if (!scatterShader)
+    {
+        puts("patch scatter is not available on this GPU, using slow buffer updates");
+        return;
+    }
+    glGenTextures(1, &ringTex);
+    glGenVertexArrays(1, &patchVao);
+    glGenBuffers(1, &patchVbo);
+    glBindVertexArray(patchVao);
+    glBindBuffer(GL_ARRAY_BUFFER, patchVbo);
+    glEnableVertexAttribArray(0);
+    glVertexAttribIPointer(0, 1, GL_UNSIGNED_INT, sizeof(Patch), (void*)0);
+    glEnableVertexAttribArray(1);
+    glVertexAttribIPointer(1, 1, GL_UNSIGNED_INT, sizeof(Patch), (void*)4);
+    glBindVertexArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+}
+
+// the view of the buffer the scatter writes through. a texture buffer reaches at most GL_MAX_TEXTURE_BUFFER_SIZE texels,
+// a patch past that goes the slow way
+static void bind_ring_texture(void)
+{
+    scatterOk = 0;
+    scatterWords = 0;
+    if (!scatterShader) return;
+    GLint maxTexels = 0;
+    glGetIntegerv(GL_MAX_TEXTURE_BUFFER_SIZE, &maxTexels);
+    int64_t words = (int64_t)poolPages * PAGE_NOTES * 3;
+    glBindTexture(GL_TEXTURE_BUFFER, ringTex);
+    if (words <= maxTexels)
+    {
+        glTexBuffer(GL_TEXTURE_BUFFER, GL_R32UI, vboBuffer);
+        scatterWords = words;
+    }
+    else if (scTexBufferRange && maxTexels > 0)
+    {
+        scTexBufferRange(GL_TEXTURE_BUFFER, GL_R32UI, vboBuffer, 0, (GLsizeiptr)maxTexels * 4);
+        scatterWords = maxTexels;
+    }
+    glBindTexture(GL_TEXTURE_BUFFER, 0);
+    scatterOk = scatterWords > 0;
+}
+
+// ---- pages ----------------------------------------------------------------------------------------------------
+// every page back to the free queue in order, nothing in the buffer is kept
+static void ring_reset(void)
+{
+    freeHead = freeCount = 0;
+    for (int p = 0; p < poolPages; p++)
+        freeQ[freeCount++] = p;
+    pageOrigin = pageLo = pageHi = livePages = 0;
+    noteHead = 0;
+    batchN = 0;
+    patchN = 0;
+    growFailed = 0;
+}
+
+// a buffer of newPages pages. keep: the pages in use are copied over on the GPU and the new pages are free, otherwise the
+// buffer starts empty. returns 0, and changes nothing, when there is no memory for it
+static int pool_resize(int newPages, int keep)
 {
     GLuint newBuffer;
     glGenBuffers(1, &newBuffer);
     glBindBuffer(GL_ARRAY_BUFFER, newBuffer);
     while (glGetError() != GL_NO_ERROR) {}
-    glBufferStorage(GL_ARRAY_BUFFER, (GLsizeiptr)newCap * sizeof(RenderNote), NULL, GL_DYNAMIC_STORAGE_BIT); // not mapped: lives in video memory
-    int32_t* newChunks = (int32_t*)malloc((size_t)(newCap >> CHUNK_SHIFT) * sizeof(int32_t));
-    if (glGetError() != GL_NO_ERROR || !newChunks)
+    glBufferStorage(GL_ARRAY_BUFFER, (GLsizeiptr)newPages * PAGE_NOTES * sizeof(RenderNote), NULL, GL_DYNAMIC_STORAGE_BIT); // not mapped: lives in video memory
+    if (glGetError() != GL_NO_ERROR)
     {
-        free(newChunks);
         glBindBuffer(GL_ARRAY_BUFFER, 0);
         glDeleteBuffers(1, &newBuffer);
         return 0;
     }
-    int newMask = newCap - 1, newChunkMask = (newCap >> CHUNK_SHIFT) - 1;
-
-    if (vboBuffer != 0 && ringHead > ringTail)
+    int old = poolPages;
+    if (keep && vboBuffer != 0)
     {
         glBindBuffer(GL_COPY_READ_BUFFER, vboBuffer);
         glBindBuffer(GL_COPY_WRITE_BUFFER, newBuffer);
-        int64_t remaining = ringHead - ringTail, absId = ringTail;
-        while (remaining > 0)
-        {
-            int oldIdx = (int)(absId & mask);
-            int newIdx = (int)(absId & newMask);
-            int64_t chunk = remaining;
-            if (ringCapacity - oldIdx < chunk) chunk = ringCapacity - oldIdx;
-            if (newCap - newIdx < chunk) chunk = newCap - newIdx;
-            glCopyBufferSubData(GL_COPY_READ_BUFFER, GL_COPY_WRITE_BUFFER, (GLintptr)oldIdx * sizeof(RenderNote), (GLintptr)newIdx * sizeof(RenderNote), (GLsizeiptr)chunk * sizeof(RenderNote));
-            absId += chunk;
-            remaining -= chunk;
-        }
+        int copyPages = old < newPages ? old : newPages;
+        glCopyBufferSubData(GL_COPY_READ_BUFFER, GL_COPY_WRITE_BUFFER, 0, 0, (GLsizeiptr)copyPages * PAGE_NOTES * sizeof(RenderNote));
         glBindBuffer(GL_COPY_READ_BUFFER, 0);
         glBindBuffer(GL_COPY_WRITE_BUFFER, 0);
-        for (int64_t c = ringTail >> CHUNK_SHIFT; c <= (ringHead - 1) >> CHUNK_SHIFT; c++)
-            newChunks[c & newChunkMask] = chunkEnd[c & chunkMask];
     }
     glBindBuffer(GL_ARRAY_BUFFER, 0);
-
     if (vboBuffer != 0)
         glDeleteBuffers(1, &vboBuffer);
-    free(chunkEnd);
     vboBuffer = newBuffer;
-    chunkEnd = newChunks;
-    chunkMask = newChunkMask;
-    mask = newMask;
-    ringCapacity = newCap;
+    poolPages = newPages;
     bind_vertex_attribs(vao, vboBuffer);
-    return 1;
-}
-
-static void ring_reset(void)
-{
-    ringHead = ringTail = 0;
-    batchN = 0;
-    openCount = 0;
-    ringGrowFailed = 0;
-}
-
-// room for n more notes. when there is no video memory left for a bigger ring the oldest notes make room
-static void ring_reserve(int n)
-{
-    while (ringHead - ringTail + n > ringCapacity)
+    bind_ring_texture();
+    if (keep)
     {
-        if (!ringGrowFailed && ringCapacity < (1 << 29))
-        {
-            printf("\nexpected vbo size limit to be reached! pre-doubling size to %s elements(%s MB of video memory used)\n", AddCommas((int64_t)ringCapacity * 2), AddCommas((int64_t)ringCapacity * 2 * sizeof(RenderNote) >> 20));
-            if (gpu_ring_resize(ringCapacity * 2))
-                continue;
-            ringGrowFailed = 1;
-            puts("cannot allocate more elements! dropping oldest notes");
-        }
-        ringTail = ringHead + n - ringCapacity;
-        break;
+        for (int p = old; p < newPages; p++)
+            freeQ[(freeHead + freeCount++) & (MAX_POOL_PAGES - 1)] = p;
     }
+    else
+        ring_reset();
+    return 1;
 }
 
 static void flush_batch(void)
 {
-    int n = batchN;
+    int64_t n = batchN;
     if (n == 0) return;
-    ring_reserve(n);
-    int64_t pos = ringHead;
-    for (int64_t c = pos >> CHUNK_SHIFT; c <= (pos + n - 1) >> CHUNK_SHIFT; c++)
-    {
-        int64_t lastInChunk = (((c + 1) << CHUNK_SHIFT) < pos + n ? ((c + 1) << CHUNK_SHIFT) : pos + n) - 1;
-        chunkEnd[c & chunkMask] = batch[lastInChunk - pos].EndTick; // notes come in end order, so the last is the latest
-    }
-    int at = (int)(pos & mask);
-    int first = ringCapacity - at < n ? ringCapacity - at : n;
+    int64_t s = noteHead - n;
+    const RenderNote* src = batch;
     glBindBuffer(GL_ARRAY_BUFFER, vboBuffer);
-    glBufferSubData(GL_ARRAY_BUFFER, (GLintptr)at * sizeof(RenderNote), (GLsizeiptr)first * sizeof(RenderNote), batch);
-    if (first < n)
-        glBufferSubData(GL_ARRAY_BUFFER, 0, (GLsizeiptr)(n - first) * sizeof(RenderNote), batch + first);
+    while (n > 0)
+    {
+        int64_t i = (s >> PAGE_SHIFT) - pageOrigin;
+        int64_t seg = PAGE_NOTES - (s & PAGE_MASK);
+        if (seg > n) seg = n;
+        if (i >= pageLo && i < pageHi && pages[i].phys >= 0) // a page dropped for lack of memory has nowhere to go
+            glBufferSubData(GL_ARRAY_BUFFER, ((GLintptr)pages[i].phys * PAGE_NOTES + (s & PAGE_MASK)) * sizeof(RenderNote), (GLsizeiptr)seg * sizeof(RenderNote), src);
+        s += seg;
+        src += seg;
+        n -= seg;
+    }
     glBindBuffer(GL_ARRAY_BUFFER, 0);
-    ringHead += n;
     batchN = 0;
+}
+
+static void __attribute__((noinline)) patch_grow(void)
+{
+    patchCap = patchCap ? patchCap * 2 : 4096;
+    patches = (Patch*)realloc(patches, (size_t)patchCap * sizeof(Patch));
+}
+
+static inline void patch_add(uint32_t word, int32_t end)
+{
+    if (UNLIKELY(patchN == patchCap)) patch_grow();
+    patches[patchN++] = (Patch){word, (uint32_t)end};
+}
+
+// writes the ends of the notes that are in video memory
+static void flush_patches(void)
+{
+    if (patchN == 0) return;
+    int64_t n = 0;
+    glBindBuffer(GL_ARRAY_BUFFER, vboBuffer);
+    for (int64_t i = 0; i < patchN; i++)
+    {
+        if (scatterOk && patches[i].word < scatterWords)
+            patches[n++] = patches[i];
+        else
+            glBufferSubData(GL_ARRAY_BUFFER, (GLintptr)patches[i].word * 4, 4, &patches[i].end);
+    }
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    if (n > 0)
+    {
+        glUseProgram(scatterShader);
+        scBindImageTexture(0, ringTex, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_R32UI);
+        glEnable(GL_RASTERIZER_DISCARD);
+        glBindVertexArray(patchVao);
+        for (int64_t at = 0; at < n; at += (1 << 22))
+        {
+            int64_t part = n - at < (1 << 22) ? n - at : (1 << 22);
+            glBindBuffer(GL_ARRAY_BUFFER, patchVbo);
+            glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)part * sizeof(Patch), patches + at, GL_STREAM_DRAW);
+            glDrawArrays(GL_POINTS, 0, (GLsizei)part);
+        }
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+        glBindVertexArray(0);
+        glDisable(GL_RASTERIZER_DISCARD);
+        glUseProgram(0);
+        scMemoryBarrier(GL_VERTEX_ATTRIB_ARRAY_BARRIER_BIT | GL_BUFFER_UPDATE_BARRIER_BIT);
+    }
+    patchN = 0;
+}
+
+static void page_free(int64_t i)
+{
+    freeQ[(freeHead + freeCount++) & (MAX_POOL_PAGES - 1)] = pages[i].phys;
+    pages[i].phys = -1;
+    livePages--;
+}
+
+// moves pageLo over the freed pages at the front, the newest page always stays
+static void pages_trim(void)
+{
+    while (pageLo < pageHi - 1 && pages[pageLo].phys < 0)
+        pageLo++;
+    if (pageLo >= 1024 && pageLo * 2 >= pageHi)
+    {
+        memmove(pages, pages + pageLo, (size_t)(pageHi - pageLo) * sizeof(PageInfo));
+        pageOrigin += pageLo;
+        pageHi -= pageLo;
+        pageLo = 0;
+    }
+}
+
+// a free physical page. when there is none the buffer doubles, and when there is no video memory for that the oldest
+// page makes room, its notes are gone
+static int phys_alloc(int* bn)
+{
+    if (freeCount == 0 && !growFailed && poolPages < MAX_POOL_PAGES)
+    {
+        int np = poolPages * 2 < MAX_POOL_PAGES ? poolPages * 2 : MAX_POOL_PAGES;
+        printf("\nexpected vbo size limit to be reached! pre-doubling size to %s elements (%s MB of video memory used)\n", 
+            AddCommas((int64_t)np * PAGE_NOTES), 
+            AddCommas((int64_t)np * PAGE_NOTES * sizeof(RenderNote) >> 20));
+        if (!pool_resize(np, 1))
+        {
+            growFailed = 1;
+            puts("cannot allocate more elements! dropping oldest notes");
+        }
+    }
+    if (freeCount == 0)
+    {
+        batchN = *bn; // the patches and the batch still point at the pages, write them before one is reused
+        flush_batch();
+        *bn = 0;
+        flush_patches();
+        int64_t i = pageLo;
+        while (pages[i].phys < 0) i++;
+        page_free(i);
+        pages_trim();
+    }
+    freeCount--;
+    return freeQ[freeHead++ & (MAX_POOL_PAGES - 1)];
+}
+
+static void page_push(int* bn)
+{
+    int phys = phys_alloc(bn);
+    if (pageHi == pageCap)
+    {
+        pageCap = pageCap ? pageCap * 2 : 1024;
+        pages = (PageInfo*)realloc(pages, (size_t)pageCap * sizeof(PageInfo));
+    }
+    pages[pageHi++] = (PageInfo){phys, 0, 0};
+    livePages++;
 }
 
 void Renderer_Init(void)
@@ -332,13 +516,10 @@ void Renderer_Init(void)
     glUseProgram(0);
 
     glGenVertexArrays(1, &vao);
-    glGenVertexArrays(1, &openVao);
-    glGenBuffers(1, &openVbo);
-    bind_vertex_attribs(openVao, openVbo);
     glGenTextures(1, &paletteTex);
 
-    ring_reset();
-    gpu_ring_resize(ringCapacity);
+    scatter_init();
+    pool_resize(RENDER_RING_MIN >> PAGE_SHIFT, 0);
     isInitialized = 1;
 }
 
@@ -360,7 +541,7 @@ void Renderer_ResetForUnload(void)
     ring_reset();
     lastSweepEnd = -1;
     lastWindowTicks = -1;
-    if (ringCapacity > RENDER_RING_MIN)
+    if ((int64_t)poolPages * PAGE_NOTES > RENDER_RING_MIN)
         deferredRingCap = RENDER_RING_MIN;
 }
 
@@ -369,28 +550,21 @@ void Renderer_Dispose(void)
     isInitialized = 0;
     kb_release();
     if (vboBuffer != 0) { glDeleteBuffers(1, &vboBuffer); vboBuffer = 0; }
-    if (openVbo != 0) { glDeleteBuffers(1, &openVbo); openVbo = 0; }
-    if (openVao != 0) { glDeleteVertexArrays(1, &openVao); openVao = 0; }
-    free(chunkEnd);
-    chunkEnd = NULL;
-    free(openNotes);
-    free(openOwner);
-    openNotes = NULL;
-    openOwner = NULL;
-    openCount = openCap = 0;
+    free(pages);
+    free(patches);
+    pages = NULL;
+    patches = NULL;
+    pageCap = patchCap = pageLo = pageHi = pageOrigin = livePages = 0;
+    if (patchVbo != 0) { glDeleteBuffers(1, &patchVbo); patchVbo = 0; }
+    if (patchVao != 0) { glDeleteVertexArrays(1, &patchVao); patchVao = 0; }
+    if (ringTex != 0) { glDeleteTextures(1, &ringTex); ringTex = 0; }
+    if (scatterShader != 0) { glDeleteProgram(scatterShader); scatterShader = 0; }
     if (frameUBO != 0) { glDeleteBuffers(1, &frameUBO); frameUBO = 0; }
     if (paletteTex != 0) { glDeleteTextures(1, &paletteTex); paletteTex = 0; }
     if (vao != 0) { glDeleteVertexArrays(1, &vao); vao = 0; }
     if (quadShader != 0) { glDeleteProgram(quadShader); quadShader = 0; }
     glDeleteVertexArrays(1, &cursorVAO);
     glDeleteProgram(cursorShader);
-}
-
-static void __attribute__((noinline)) open_grow(void)
-{
-    openCap = openCap ? openCap * 2 : 1024;
-    openNotes = (RenderNote*)realloc(openNotes, (size_t)openCap * sizeof(RenderNote));
-    openOwner = (KeyHeader**)realloc(openOwner, (size_t)openCap * sizeof(KeyHeader*));
 }
 
 static void __attribute__((noinline)) batch_full(int* bn)
@@ -400,6 +574,23 @@ static void __attribute__((noinline)) batch_full(int* bn)
     *bn = 0;
 }
 
+// the note off of the note at slot32: its end goes in the batch if the note is still there, else in a patch
+static void __attribute__((noinline)) close_note(uint32_t slot32, int64_t tick, int bn)
+{
+    int64_t slot = noteHead - (int64_t)((uint32_t)noteHead - slot32); // the notes sounding are fewer than 2^32
+    int32_t end = tick ? (int32_t)tick : 1; // 0 means "still sounding"
+    int64_t i = (slot >> PAGE_SHIFT) - pageOrigin;
+    if (UNLIKELY(i < pageLo || i >= pageHi || pages[i].phys < 0)) return; // dropped when the video memory ran out
+    PageInfo* p = &pages[i];
+    p->open--;
+    if (end > p->maxEnd) p->maxEnd = end;
+    int64_t inBatch = slot - (noteHead - bn);
+    if (inBatch >= 0)
+        batch[inBatch].EndTick = end;
+    else
+        patch_add((uint32_t)(((int64_t)p->phys * PAGE_NOTES + (slot & PAGE_MASK)) * 3 + 1), end);
+}
+
 static inline __attribute__((always_inline))
 void process_one_event(KeyHeader* k, uint32_t statusHigh, uint32_t key, uint32_t velocity, uint32_t color, uint32_t hi, int64_t tick, int* bn)
 {
@@ -407,32 +598,18 @@ void process_one_event(KeyHeader* k, uint32_t statusHigh, uint32_t key, uint32_t
     {
         if (k->count == 0)
         {
-            if (UNLIKELY(openCount == openCap)) open_grow();
-            int i = openCount++;
-            k->openIdx = i;
-            openNotes[i] = (RenderNote){.StartTick = (int32_t)tick, .EndTick = 0, .PackedData = (hi << 24) | (color << 16) | (key << 8) | velocity};
-            openOwner[i] = k;
+            if (UNLIKELY((noteHead & PAGE_MASK) == 0)) page_push(bn);
+            pages[pageHi - 1].open++;
+            k->slot = (uint32_t)noteHead++;
+            batch[(*bn)++] = (RenderNote){.StartTick = (int32_t)tick, .EndTick = 0, .PackedData = (hi << 24) | (color << 16) | (key << 8) | velocity};
+            if (UNLIKELY(*bn == BATCH_NOTES)) batch_full(bn);
         }
         k->count++;
     }
     else if (statusHigh == 0x80)
     {
         if (k->count > 0 && --k->count == 0)
-        {
-            int i = k->openIdx;
-            RenderNote done = openNotes[i];
-            done.EndTick = tick ? (int32_t)tick : 1; // 0 means "still sounding"
-            int last = --openCount;
-            if (i != last)
-            {
-                openNotes[i] = openNotes[last];
-                KeyHeader* moved = openOwner[last];
-                openOwner[i] = moved;
-                moved->openIdx = i;
-            }
-            batch[(*bn)++] = done;
-            if (UNLIKELY(*bn == BATCH_NOTES)) batch_full(bn);
-        }
+            close_note(k->slot, tick, *bn);
     }
 }
 
@@ -532,19 +709,6 @@ static void sweep_range(int64_t fromTick, int64_t toTick)
     flush_batch();
 }
 
-// drops the notes that ended left of the view, a whole chunk at a time. notes are in end order, so the last note of a
-// chunk is its latest end, and a chunk that ends before the view has nothing left to show
-static void advance_tail(int viewStart)
-{
-    while (ringTail < ringHead)
-    {
-        int64_t c = ringTail >> CHUNK_SHIFT;
-        if (chunkEnd[c & chunkMask] >= viewStart) break;
-        int64_t chunkTop = (c + 1) << CHUNK_SHIFT;
-        ringTail = chunkTop < ringHead ? chunkTop : ringHead;
-    }
-}
-
 static void upload_palette(void)
 {
     uint8_t paletteData[256 * 3];
@@ -562,32 +726,56 @@ static void upload_palette(void)
     paletteUploadPending = 0;
 }
 
-static void draw_instances(GLuint array, int64_t from, int64_t count)
+// frees the pages that have nothing left to show: no note of them is sounding and all ended left of the view
+static void release_pages(int viewStart)
 {
-    glBindVertexArray(array);
-    int startIdx = (int)(from & mask);
-    if (startIdx + count <= ringCapacity)
+    for (int64_t i = pageLo; i < pageHi - 1; i++)
     {
-        glDrawArraysInstancedBaseInstance(GL_TRIANGLE_STRIP, 0, 4, (GLsizei)count, startIdx);
+        PageInfo* p = &pages[i];
+        if (p->phys >= 0 && p->open == 0 && p->maxEnd < viewStart)
+            page_free(i);
     }
-    else
+    pages_trim();
+}
+
+static int64_t live_notes(void)
+{
+    if (livePages == 0) return 0;
+    int64_t newestStart = (pageOrigin + pageHi - 1) << PAGE_SHIFT;
+    return (livePages - 1) * PAGE_NOTES + (noteHead - newestStart);
+}
+
+// the live pages in order, a run of pages that are also next to each other in the buffer is one draw
+static void draw_pages(void)
+{
+    glBindVertexArray(vao);
+    int64_t i = pageLo;
+    while (i < pageHi)
     {
-        int firstChunk = ringCapacity - startIdx;
-        glDrawArraysInstancedBaseInstance(GL_TRIANGLE_STRIP, 0, 4, firstChunk, startIdx);
-        glDrawArraysInstancedBaseInstance(GL_TRIANGLE_STRIP, 0, 4, (GLsizei)(count - firstChunk), 0);
+        if (pages[i].phys < 0) { i++; continue; }
+        int64_t j = i;
+        int64_t notes = PAGE_NOTES;
+        while (j + 1 < pageHi && pages[j + 1].phys == pages[j].phys + 1)
+            j++, notes += PAGE_NOTES;
+        if (j == pageHi - 1) // the newest page is not full
+            notes -= PAGE_NOTES - (noteHead - (((pageOrigin + j) << PAGE_SHIFT)));
+        else if (i == pageHi - 1)
+            notes = noteHead - ((pageOrigin + i) << PAGE_SHIFT);
+        glDrawArraysInstancedBaseInstance(GL_TRIANGLE_STRIP, 0, 4, (GLsizei)notes, (GLuint)((int64_t)pages[i].phys * PAGE_NOTES));
+        i = j + 1;
     }
 }
 
 static void draw_notes(int viewStart, int viewEnd, int32_t tick, float yBottom, float yTop, float pixelsPerTick)
 {
     float yStep = (yTop - yBottom) / 128.0f;
-    // with the notes in end order, which of two overlapping notes is on top would depend on the order they ended in.
-    // the depth buffer puts the one that started later in front, like when the notes were in start order. blending
-    // needs the draw order, so with transparency the notes are drawn in end order and without a depth test
+    // the pages are in start order, so overlapping notes are already in the right order: the later start is drawn over the
+    // earlier one, and for the same tick the higher track. that is also what blending needs. the depth buffer is only for
+    // UseDepthOrder, the track priority mode, where the higher track is in front whatever the start
     int useDepth = UseDepthOrder && !EnableTransparency;
     FrameUniforms uniforms = {
         .uMetrics = { pixelsPerTick, yBottom, yStep },
-        .uGlowEnabled = (float)EnableGlow,
+        .uGlowEnabled = EnableGlow,
         .uViewStart = viewStart,
         .uViewEnd = viewEnd,
         .uCurrentTick = tick,
@@ -609,16 +797,7 @@ static void draw_notes(int viewStart, int viewEnd, int32_t tick, float yBottom, 
         glDepthFunc(GL_LEQUAL);
     }
 
-    if (ringHead > ringTail)
-        draw_instances(vao, ringTail, ringHead - ringTail);
-    if (openCount > 0)
-    {
-        glBindBuffer(GL_ARRAY_BUFFER, openVbo);
-        glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)openCount * sizeof(RenderNote), openNotes, GL_STREAM_DRAW);
-        glBindBuffer(GL_ARRAY_BUFFER, 0);
-        glBindVertexArray(openVao);
-        glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, openCount);
-    }
+    draw_pages();
 
     if (useDepth)
         glDisable(GL_DEPTH_TEST);
@@ -647,7 +826,7 @@ void Renderer_Render(int32_t tick, int pad)
 {
     if (deferredRingCap > 0)
     {
-        gpu_ring_resize(deferredRingCap);
+        pool_resize(deferredRingCap >> PAGE_SHIFT, 0);
         deferredRingCap = -1;
     }
 
@@ -684,7 +863,7 @@ void Renderer_Render(int32_t tick, int pad)
     }
 
     int sweepEnd = viewEnd + lookaheadTicks;
-    // the notes that ended left of the previous view are gone from the ring, so a view that moved back needs a new sweep,
+    // the pages that ended left of the previous view are gone, so a view that moved back needs a new sweep,
     // even when its right end did not move (it stops at the end of the song)
     int incremental = lastSweepEnd >= 0 && sweepEnd >= lastSweepEnd && (sweepEnd - lastSweepEnd) < WindowTicks && viewStart >= lastViewStart;
 
@@ -701,10 +880,11 @@ void Renderer_Render(int32_t tick, int pad)
 
     lastSweepEnd = sweepEnd;
     lastViewStart = viewStart;
-    advance_tail(viewStart);
+    flush_patches();
+    release_pages(viewStart);
 
-    NotesDrawnLastFrame = (int)(ringHead - ringTail) + openCount;
-    RingCap = ringCapacity;
+    NotesDrawnLastFrame = (int)live_notes();
+    RingCap = poolPages * PAGE_NOTES;
 
     float yBottom = -1.0f + 2.0f * pad / fbHeight;
     float yTop = 1.0f - 2.0f * pad / fbHeight;
