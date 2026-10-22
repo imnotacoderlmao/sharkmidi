@@ -5,6 +5,7 @@
 #include "../playback/timer.h"
 #include "../playback/playback_thread.h"
 #include "../third_party/conmidi_digit_formatter.h"
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -19,8 +20,12 @@
 
 #ifdef _OPENMP
     #define ATOMIC_ADD(a, b) __atomic_fetch_add(&(a), (b), __ATOMIC_RELAXED)
+    #define OMP_PARALLEL_FOR _Pragma("omp parallel for schedule(dynamic, 1)")
+    #define OMP_CRITICAL _Pragma("omp critical")
 #else
     #define ATOMIC_ADD(a, b) ((a) += (b))
+    #define OMP_PARALLEL_FOR
+    #define OMP_CRITICAL
 #endif
 
 typedef struct
@@ -34,12 +39,8 @@ typedef struct
 // note-ons in 16 bits each. a group that doesn't fit (count at 0xFFFF marks it) keeps its real values in the
 // track's TrackEsc list instead. once the merge knows where the group goes the same 8 bytes hold its offset
 // in eventArr, which is what the track parser reads
-#ifndef TT_COUNT_MAX
-#define TT_COUNT_MAX 0xFFFEu // largest count a TrackTick holds, test hook: a small value sends most groups through the escape path
-#endif
-#ifndef TT_DT_MAX
+#define TT_COUNT_MAX 0xFFFEu // largest count a TrackTick holds
 #define TT_DT_MAX 0xFFFFFFFFull // largest tick distance a TrackTick holds
-#endif
 typedef union
 {
     struct
@@ -66,27 +67,16 @@ int32_t midiloaded = 0, trackcolors = 1;
 static uint64_t eventcount = 0; // channel events
 static uint64_t bytecount = 0;  // bytes they take in eventArr (see midistorage.h)
 
-// off unless the environment variable is set (and not "0"):
-//   SHARKMIDI_TRACE=1          prints where the time between the counted phases goes
-static int g_trace = 0;
-// events are parsed in output order tiles (see ParseTiled). SHARKMIDI_TILE_KB sets the output size of one tile
-// in KB (default 1024, or more for files with many tracks, see ParseTiled)
-static int g_tile_kb = 1024;
-static int g_tile_set = 0; // the size was asked for, so it is used as it is
-typedef struct
-{
-    int64_t tile_kb;
-    double mainalloc, rank_alloc, rank_bounds, rank_pass1, rank_scan, rank_pass2, rank_free, compact, evalloc, tail;
-    int rank_used;
-} TraceTimes;
-static TraceTimes tr;
-// adds the time since *mark to tr.field and restarts the mark. costs one branch when tracing is off
-#define TR_LAP(field, mark) do { if (g_trace) { double now_ = get_time(); tr.field += now_ - (mark); (mark) = now_; } } while (0)
-static int env_flag(const char* name)
-{
-    const char* v = getenv(name);
-    return v && *v && strcmp(v, "0") != 0;
-}
+// events are parsed in output order tiles (see ParseTiled), this is the output size of one tile (more for files with
+// many tracks)
+#define TILE_BYTES (1024 * 1024)
+
+// the table release (see release_tables) is a posix thing
+#if defined(_WIN32) || defined(_WIN64)
+    #define HAS_TABLE_RELEASE 0
+#else
+    #define HAS_TABLE_RELEASE 1
+#endif
 
 DEFINE_ARRAY(trackProperties);
 DEFINE_ARRAY(TrackTick);
@@ -253,6 +243,9 @@ static int64_t __attribute__((noinline)) varlen_decode_slow(int64_t* len, uint8_
     return (*len = val);
 }
 
+// reads a variable length number at trackPtr into a new variable v. the first byte is inline, the rest is the slow part
+#define READ_VARLEN(v) int64_t v = *trackPtr++; if (v >= 0x80) v = varlen_decode_slow(&v, &trackPtr)
+
 static uint32_t ReadUInt32(void)
 {
     uint32_t val;
@@ -321,26 +314,21 @@ static int IndexTrack(trackProperties_arr* tracklistptr)
     return 0;
 }
 
-static int cmp_tempo(const void* a, const void* b)
+// tempo, time signature and sysex events all start with their int64_t tick
+static int cmp_tick(const void* a, const void* b)
 {
-    int64_t posa = ((const TempoEvent*)a)->tick;
-    int64_t posb = ((const TempoEvent*)b)->tick;
+    int64_t posa = *(const int64_t*)a;
+    int64_t posb = *(const int64_t*)b;
     return (posa > posb) - (posa < posb);
 }
-
-static int cmp_timesig(const void* a, const void* b)
-{
-    int64_t posa = ((const TimeSigEvent*)a)->tick;
-    int64_t posb = ((const TimeSigEvent*)b)->tick;
-    return (posa > posb) - (posa < posb);
-}
+_Static_assert(offsetof(TempoEvent, tick) == 0 && offsetof(TimeSigEvent, tick) == 0 && offsetof(SysExEvent, tick) == 0, "cmp_tick needs tick first");
 
 // sorts the signatures, makes sure there is one at tick 0, and numbers the measures. a signature that lands in the
 // middle of a measure ends that measure early, the way a player would restart the count
 static void finalize_timesigs(void)
 {
     if (timesigs.count > 1)
-        qsort(timesigs.data, timesigs.count, sizeof(TimeSigEvent), cmp_timesig);
+        qsort(timesigs.data, timesigs.count, sizeof(TimeSigEvent), cmp_tick);
     timesigs_in_file = timesigs.count;
     if (timesigs.count == 0 || timesigs.data[0].tick > 0)
     {
@@ -365,13 +353,6 @@ static void finalize_timesigs(void)
         const TimeSigEvent* p = &timesigs.data[i - 1];
         e->measure = p->measure + (e->tick - p->tick + p->measure_ticks - 1) / p->measure_ticks;
     }
-}
-
-static int cmp_sysex(const void* a, const void* b)
-{
-    int64_t posa = ((const SysExEvent*)a)->tick;
-    int64_t posb = ((const SysExEvent*)b)->tick;
-    return (posa > posb) - (posa < posb);
 }
 
 // the two hot parsers are only called from LoadMIDI. noipa keeps them out of line and free of the interprocedural
@@ -431,7 +412,6 @@ static inline __attribute__((always_inline)) uint32_t rsb_key(uint32_t st, uint3
 
 // cps / cpstep: checkpoints every cpstep groups are appended to cps. cpstep 0 records none.
 // returns the number of channel events, *bytes_out gets the bytes they take
-static void tt_esc_push(TrackEsc_arr* a, int64_t idx, int64_t tick, uint32_t count, uint32_t notes);
 static NOIPA int64_t CountTrackEvents(uint8_t* trackPtr, uint8_t* trackEnd, TrackTick_arr* tickgroup, TrackEsc_arr* esc, Checkpoint_arr* cps, int64_t cpstep, int64_t* bytes_out)
 {
     const uint8_t* trackBase = trackPtr;
@@ -527,9 +507,7 @@ static NOIPA int64_t CountTrackEvents(uint8_t* trackPtr, uint8_t* trackEnd, Trac
 
         // generic path: one event, anything goes (tail of the track, meta, sysex, long deltas)
         uint8_t* evstart = trackPtr;
-        int64_t delta = *trackPtr++;
-        if (delta >= 0x80)
-            delta = varlen_decode_slow(&delta, &trackPtr);
+        READ_VARLEN(delta);
         if(delta > 0)
         {
             if (count > 0)
@@ -568,9 +546,7 @@ static NOIPA int64_t CountTrackEvents(uint8_t* trackPtr, uint8_t* trackEnd, Trac
                 {
                     case 0xF0:
                     {
-                        int64_t len = *trackPtr++;
-                        if (len >= 0x80)
-                            varlen_decode_slow(&len, &trackPtr);
+                        READ_VARLEN(len);
                         trackPtr += len;
                         continue;
                     }
@@ -585,9 +561,7 @@ static NOIPA int64_t CountTrackEvents(uint8_t* trackPtr, uint8_t* trackEnd, Trac
                         readEvent = *trackPtr++;
                         if (readEvent != 0x2F)
                         {
-                            int64_t len2 = *trackPtr++;
-                            if (len2 >= 0x80)
-                                varlen_decode_slow(&len2, &trackPtr);
+                            READ_VARLEN(len2);
                             trackPtr += len2;
                         }
                         else
@@ -609,9 +583,7 @@ static NOIPA int64_t CountTrackEvents(uint8_t* trackPtr, uint8_t* trackEnd, Trac
         }
     }
 finalize:;
-    #ifdef _OPENMP
-        #pragma omp critical
-    #endif
+    OMP_CRITICAL
     if (absolutetime > maxTick)
         maxTick = absolutetime;
     if (count > 0)
@@ -765,9 +737,7 @@ static NOIPA int64_t ParseRange(Cursor* cur, uint8_t* trackEnd, uint8_t* msgPtr,
         if (trackPtr >= trackEnd) break;
 
         uint8_t* evstart = trackPtr;
-        int64_t delta = *trackPtr++;
-        if (delta >= 0x80)
-            delta = varlen_decode_slow(&delta, &trackPtr);
+        READ_VARLEN(delta);
         if (delta > 0 && lastkey != RSB_NOKEY)
         {
             if (store) rsb_close(msgPtr, write_pos, &lastkey);
@@ -810,9 +780,7 @@ static NOIPA int64_t ParseRange(Cursor* cur, uint8_t* trackEnd, uint8_t* msgPtr,
                 {
                     case 0xF0:
                     {
-                        int64_t size = *trackPtr++;
-                        if (size >= 0x80)
-                            size = varlen_decode_slow(&size, &trackPtr);
+                        READ_VARLEN(size);
                         if (size > trackEnd - trackPtr) // a length running past the end of the track is corrupt, nothing there to read
                         {
                             trackPtr = trackEnd;
@@ -835,9 +803,7 @@ static NOIPA int64_t ParseRange(Cursor* cur, uint8_t* trackEnd, uint8_t* msgPtr,
                             continue;
                         }
                         SysExEvent sex = {absolutetime, size + 1, data};
-                        #ifdef _OPENMP
-                            #pragma omp critical
-                        #endif
+                        OMP_CRITICAL
                         SysExEvent_arr_push(sysex, sex);
                         continue;
                     }
@@ -853,9 +819,7 @@ static NOIPA int64_t ParseRange(Cursor* cur, uint8_t* trackEnd, uint8_t* msgPtr,
                         readEvent = *trackPtr++;
                         if (readEvent == 0x51)
                         {
-                            int64_t len = *trackPtr++;
-                            if (len >= 0x80)
-                                len = varlen_decode_slow(&len, &trackPtr);
+                            READ_VARLEN(len);
                             if (len > trackEnd - trackPtr) // runs past the end of the track: corrupt
                             {
                                 trackPtr = trackEnd;
@@ -868,17 +832,13 @@ static NOIPA int64_t ParseRange(Cursor* cur, uint8_t* trackEnd, uint8_t* msgPtr,
                             if (store)
                             {
                                 TempoEvent tev = {absolutetime, (int32_t)tempoVal};
-                                #ifdef _OPENMP
-                                    #pragma omp critical
-                                #endif
+                                OMP_CRITICAL
                                 TempoEvent_arr_push(tempo, tev);
                             }
                         }
                         else if (readEvent == 0x58)
                         {
-                            int64_t len = *trackPtr++;
-                            if (len >= 0x80)
-                                len = varlen_decode_slow(&len, &trackPtr);
+                            READ_VARLEN(len);
                             if (len > trackEnd - trackPtr)
                             {
                                 trackPtr = trackEnd;
@@ -887,9 +847,7 @@ static NOIPA int64_t ParseRange(Cursor* cur, uint8_t* trackEnd, uint8_t* msgPtr,
                             if (store && len >= 2 && trackPtr[0] != 0 && trackPtr[1] <= 15) // numerator, power of two denominator
                             {
                                 TimeSigEvent ts = {absolutetime, 0, 0, trackPtr[0], trackPtr[1]};
-                                #ifdef _OPENMP
-                                    #pragma omp critical
-                                #endif
+                                OMP_CRITICAL
                                 TimeSigEvent_arr_push(&timesigs, ts);
                             }
                             trackPtr += len;
@@ -901,9 +859,7 @@ static NOIPA int64_t ParseRange(Cursor* cur, uint8_t* trackEnd, uint8_t* msgPtr,
                         }
                         else
                         {
-                            int64_t len = *trackPtr++;
-                            if (len >= 0x80)
-                                len = varlen_decode_slow(&len, &trackPtr);
+                            READ_VARLEN(len);
                             trackPtr += len;
                         }
                         continue;
@@ -947,10 +903,8 @@ static int track_is_tiled(const TrackTick_arr* h)
 // of ParseTiled starts at a Count checkpoint. so once all slices below some point are done, nothing reads the front
 // of a table anymore and its pages can go back to the system, while the event array fills up. this keeps the peak
 // at what the loaded file takes in the end instead of that plus all of the tables. a no-op on Windows.
-#if !defined(_WIN32) && !defined(_WIN64)
-#ifndef TABLE_RELEASE_MIN
+#if HAS_TABLE_RELEASE
 #define TABLE_RELEASE_MIN (128 * 1024) // give back at least this much at a time, every call is a system call
-#endif
 static void release_tables(TrackTick_arr* hist, const uint8_t* wide, const int32_t* tl, int32_t nt, const Checkpoint_arr* cps, int64_t cpstep, int64_t t0, uintptr_t* freed_to)
 {
     static long pagesz = 0;
@@ -991,8 +945,7 @@ static void ParseTiled(const trackProperties_arr* tracks, TrackTick_arr* hist, c
     #ifdef _OPENMP
         threads = omp_get_max_threads();
     #endif
-    int64_t bev = (int64_t)g_tile_kb * 1024; // bytes of eventArr per tile
-    if (!g_tile_set)
+    int64_t bev = TILE_BYTES; // bytes of eventArr per tile
     {
         // a tile visits every track, and every visit costs a call and a cache miss or two on that track's input
         // before it does any work. with many tracks a tile has to be bigger so each visit gets real work, about
@@ -1001,12 +954,10 @@ static void ParseTiled(const trackProperties_arr* tracks, TrackTick_arr* hist, c
         if (want > cap) want = cap;
         if (want > bev) bev = want;
     }
-    if (bev < 1) bev = 1;
-    tr.tile_kb = bev >> 10;
     int64_t nb = (total + bev - 1) / bev;
     int64_t ns = (int64_t)threads * 8; // several slices per thread, they are claimed dynamically
     if (ns > nb) ns = nb;
-    #if !defined(_WIN32) && !defined(_WIN64)
+    #if HAS_TABLE_RELEASE
     uint8_t* sdone = calloc((size_t)ns, 1);      // slices that are finished
     uintptr_t* freed_to = malloc((size_t)nt * sizeof(uintptr_t)); // per track: the table is given back up to here
     long pg = sysconf(_SC_PAGESIZE);
@@ -1016,9 +967,7 @@ static void ParseTiled(const trackProperties_arr* tracks, TrackTick_arr* hist, c
     int64_t relwm = 0; // all slices below this are done, only touched by the thread holding relbusy
     #endif
 
-    #ifdef _OPENMP
-        #pragma omp parallel for schedule(dynamic, 1)
-    #endif
+    OMP_PARALLEL_FOR
     for (int64_t s = 0; s < ns; s++)
     {
         int64_t b0 = nb * s / ns, b1 = nb * (s + 1) / ns;
@@ -1065,7 +1014,7 @@ static void ParseTiled(const trackProperties_arr* tracks, TrackTick_arr* hist, c
         }
         ATOMIC_ADD(playednotes, notes);
         free(cur);
-        #if !defined(_WIN32) && !defined(_WIN64)
+        #if HAS_TABLE_RELEASE
         __atomic_store_n(&sdone[s], 1, __ATOMIC_RELEASE);
         if (!__atomic_exchange_n(&relbusy, 1, __ATOMIC_ACQUIRE))
         {
@@ -1077,9 +1026,8 @@ static void ParseTiled(const trackProperties_arr* tracks, TrackTick_arr* hist, c
             __atomic_store_n(&relbusy, 0, __ATOMIC_RELEASE);
         }
         #endif
-        
     }
-    #if !defined(_WIN32) && !defined(_WIN64)
+    #if HAS_TABLE_RELEASE
     free(sdone);
     free(freed_to);
     #endif
@@ -1144,33 +1092,6 @@ static void printparsestatistics(void)
         AddCommas(activetickcount * sizeof(TickGroup)), AddCommas(bytecount), (double)bytecount / (double)(eventcount ? eventcount : 1),
         AddCommas(trackRLEBytes), AddCommas(trackGroups.runs ? trackGroups.count : 0),
         AddCommas((activetickcount * sizeof(TickGroup)) + bytecount + trackRLEBytes));
-}
-
-static void printtrace(void)
-{
-    int threads = 1;
-    #ifdef _OPENMP
-        threads = omp_get_max_threads();
-    #endif
-    printf("=============== TRACE (SHARKMIDI_TRACE) ===============\n");
-    printf("   OpenMP threads:        %d\n", threads);
-    printf("   merge path:            %s\n", tr.rank_used ? "rank" : "heap (merge_timing)");
-    printf("   parse:                 tiled, %lld KB output per tile\n", (long long)tr.tile_kb);
-    printf("   timing/track alloc:    %lfs\n", tr.mainalloc);
-    if (tr.rank_used)
-    {
-        printf("   rank: alloc:           %lfs\n", tr.rank_alloc);
-        printf("   rank: prefix+bounds:   %lfs\n", tr.rank_bounds);
-        printf("   rank: pass 1:          %lfs\n", tr.rank_pass1);
-        printf("   rank: prefix sums:     %lfs\n", tr.rank_scan);
-        printf("   rank: pass 2:          %lfs\n", tr.rank_pass2);
-        printf("   rank: free:            %lfs\n", tr.rank_free);
-    }
-    printf("   offsets compaction:    %lfs\n", tr.compact);
-    printf("   event array alloc:     %lfs\n", tr.evalloc);
-    printf("   free + unmap:          %lfs\n", tr.tail);
-    printf("   (calloc'd memory is only touched later, its page-fault cost lands in the phase that first writes it)\n");
-    printf("=======================================================\n");
 }
 
 static TempoEvent_arr tempos = {0};
@@ -1306,16 +1227,18 @@ static inline void tg_put(int64_t idx, int64_t offset, uint32_t count, uint32_t 
         trackGroups.anchors[idx / TG_ANCHOR] = offset;
 }
 
-static void tg_drop(const char* why)
+static void tg_free(void)
 {
-    printf("track colors off for this file: %s\n", why);
     free(trackGroups.runs);
     free(trackGroups.tracks);
     free(trackGroups.anchors);
-    trackGroups.runs = NULL;
-    trackGroups.tracks = NULL;
-    trackGroups.anchors = NULL;
-    trackGroups.count = 0;
+    trackGroups = (TrackGroupArr){0};
+}
+
+static void tg_drop(const char* why)
+{
+    printf("track colors off for this file: %s\n", why);
+    tg_free();
 }
 
 static inline void merge_emit(MergeState* m, int64_t tick, uint32_t count, uint32_t notes, TrackTick* slot, uint32_t track, int fill)
@@ -1406,9 +1329,7 @@ static int64_t count_distinct_ticks(TrackTick_arr* hist, int32_t tracks, int64_t
     if (words * 8 > total_entries * 4) return -1;
     uint64_t* bits = calloc(words, sizeof(uint64_t));
     if (!bits) return -1;
-    #ifdef _OPENMP
-        #pragma omp parallel for schedule(dynamic, 1)
-    #endif
+    OMP_PARALLEL_FOR
     for (int32_t t = 0; t < tracks; t++)
     {
         TTIter it;
@@ -1467,7 +1388,6 @@ static int merge_by_rank(TrackTick_arr* hist, int32_t tracks, const uint64_t* bi
 {
     int64_t words = (maxTick >> 6) + 1;
     if (distinct <= 0 || distinct >= UINT32_MAX) return 0;
-    double trm = g_trace ? get_time() : 0.0;
     int chunks = distinct >= 4096 ? RANK_CHUNKS : 1;
     uint32_t* wprefix = malloc((words + 1) * sizeof(uint32_t));
     uint32_t* evcur = calloc(distinct, sizeof(uint32_t));                  // events already placed on each tick
@@ -1481,7 +1401,6 @@ static int merge_by_rank(TrackTick_arr* hist, int32_t tracks, const uint64_t* bi
         free(wprefix); free(evcur); free(ecur); free(tickbound); free(bnd); free(pos); free(part);
         return 0;
     }
-    TR_LAP(rank_alloc, trm);
     uint32_t run = 0;
     for (int64_t w = 0; w < words; w++)
     {
@@ -1496,9 +1415,7 @@ static int merge_by_rank(TrackTick_arr* hist, int32_t tracks, const uint64_t* bi
         tickbound[c] = tick_of_rank(bits, wprefix, words, distinct * c / chunks);
 
     // where every track's groups cross those tick bounds
-    #ifdef _OPENMP
-        #pragma omp parallel for schedule(dynamic, 1)
-    #endif
+    OMP_PARALLEL_FOR
     for (int32_t t = 0; t < tracks; t++)
     {
         TTIter it;
@@ -1522,12 +1439,8 @@ static int merge_by_rank(TrackTick_arr* hist, int32_t tracks, const uint64_t* bi
         b[chunks] = n;
     }
 
-    TR_LAP(rank_bounds, trm);
-
     // pass 1: what lands on each tick (events, notes and, for the track index, groups)
-    #ifdef _OPENMP
-        #pragma omp parallel for schedule(dynamic, 1)
-    #endif
+    OMP_PARALLEL_FOR
     for (int c = 0; c < chunks; c++)
         for (int32_t t = 0; t < tracks; t++)
         {
@@ -1545,8 +1458,6 @@ static int merge_by_rank(TrackTick_arr* hist, int32_t tracks, const uint64_t* bi
                 if (ecur) ecur[r]++;
             }
         }
-
-    TR_LAP(rank_pass1, trm);
 
     // prefix sums: start offset of each tick in eventArr, notes up to and including it, first group index on it
     int64_t events = 0, notes = 0;
@@ -1566,12 +1477,8 @@ static int merge_by_rank(TrackTick_arr* hist, int32_t tracks, const uint64_t* bi
         }
     }
 
-    TR_LAP(rank_scan, trm);
-
     // pass 2: place every group. tracks are visited in order, so groups of one tick end up ordered by track
-    #ifdef _OPENMP
-        #pragma omp parallel for schedule(dynamic, 1)
-    #endif
+    OMP_PARALLEL_FOR
     for (int c = 0; c < chunks; c++)
         for (int32_t t = 0; t < tracks; t++)
         {
@@ -1593,9 +1500,7 @@ static int merge_by_rank(TrackTick_arr* hist, int32_t tracks, const uint64_t* bi
                 shape_add(sp, offset, it.count);
             }
         }
-    #ifdef _OPENMP
-        #pragma omp parallel for schedule(dynamic, 1)
-    #endif
+    OMP_PARALLEL_FOR
     for (int32_t t = 0; t < tracks; t++)
     {
         g_shape[t] = (TrackShape){0};
@@ -1603,10 +1508,7 @@ static int merge_by_rank(TrackTick_arr* hist, int32_t tracks, const uint64_t* bi
             shape_join(&g_shape[t], &part[(size_t)t * chunks + c]);
     }
 
-    TR_LAP(rank_pass2, trm);
     free(wprefix); free(evcur); free(ecur); free(tickbound); free(bnd); free(pos); free(part);
-    TR_LAP(rank_free, trm);
-    tr.rank_used = 1;
     return 1;
 }
 
@@ -1615,9 +1517,6 @@ static int merge_by_rank(TrackTick_arr* hist, int32_t tracks, const uint64_t* bi
 // back to back (nothing from another track lands between them, always true for a single track file) doesn't
 // need them at all: only its first offset is kept and the array is released. a gap of 4 GB or more, which takes
 // a track that sits out that many bytes of the others' events, gets 8 byte distances instead (*wide)
-#ifndef COMPACT_FORCE_WIDE
-#define COMPACT_FORCE_WIDE 0 // test hook: 1 makes every track wide, 2 every odd one
-#endif
 static void compact_offsets(TrackTick_arr* a, int64_t* start, uint8_t* wide, Checkpoint_arr* cps, int32_t idx)
 {
     *start = 0;
@@ -1627,8 +1526,6 @@ static void compact_offsets(TrackTick_arr* a, int64_t* start, uint8_t* wide, Che
         return;
     TrackTick* src = a->data;
     *start = src[0].offset;
-    // the gaps can't reach 4G when the whole file has fewer events than that, then the scan may stop early
-    int needgap = bytecount >= (uint64_t)UINT32_MAX;
     int contiguous = g_shape[idx].contig;
     int64_t maxgap = g_shape[idx].maxgap;
     if (contiguous)
@@ -1637,7 +1534,7 @@ static void compact_offsets(TrackTick_arr* a, int64_t* start, uint8_t* wide, Che
         a->data = NULL;
         return;
     }
-    int usewide = maxgap > (int64_t)UINT32_MAX || COMPACT_FORCE_WIDE == 1 || (COMPACT_FORCE_WIDE == 2 && (idx & 1));
+    int usewide = maxgap > (int64_t)UINT32_MAX;
     *wide = (uint8_t)usewide;
     int64_t ncp = cps ? cps->count : 0;
     for (int64_t c = 0; c < ncp; c++)
@@ -1645,52 +1542,30 @@ static void compact_offsets(TrackTick_arr* a, int64_t* start, uint8_t* wide, Che
     // the table is written over the TrackTicks it is made from, which is safe: entry j is only written after
     // the groups up to j + 1 were read, and an entry (4 or 8 bytes) is not larger than a TrackTick
     int64_t cur = src[0].offset;
-    if (usewide)
-    {
-        int64_t* dst = (int64_t*)a->data;
-        for (int64_t j = 0; j < a->count; j++)
-        {
-            int64_t nxt = j + 1 < a->count ? src[j + 1].offset : cur; // read before dst[j] can overwrite it
-            if (j > 0 && j % TILE_CP_STEP == 0 && j / TILE_CP_STEP <= ncp)
-                cps->data[j / TILE_CP_STEP - 1].off = cur;
-            dst[j] = nxt - cur;
-            cur = nxt;
-        }
-        void* p = realloc(a->data, (a->count + 2) * sizeof(int64_t)); // +2: spare entries the parse reads ahead
-        if (p) a->data = p;
-        dst = (int64_t*)a->data;
-        dst[a->count - 1] = dst[a->count] = dst[a->count + 1] = 0;
-    }
-    else
-    {
-        uint32_t* dst = (uint32_t*)a->data;
-        for (int64_t j = 0; j < a->count; j++)
-        {
-            int64_t nxt = j + 1 < a->count ? src[j + 1].offset : cur;
-            if (j > 0 && j % TILE_CP_STEP == 0 && j / TILE_CP_STEP <= ncp)
-                cps->data[j / TILE_CP_STEP - 1].off = cur;
-            dst[j] = (uint32_t)(nxt - cur);
-            cur = nxt;
-        }
-        void* p = realloc(a->data, (a->count + 2) * sizeof(uint32_t));
-        if (p) a->data = p;
-        dst = (uint32_t*)a->data;
-        dst[a->count - 1] = dst[a->count] = dst[a->count + 1] = 0;
-    }
+    #define COMPACT_TABLE(T) do { \
+        T* dst = (T*)a->data; \
+        for (int64_t j = 0; j < a->count; j++) \
+        { \
+            int64_t nxt = j + 1 < a->count ? src[j + 1].offset : cur; /* read before dst[j] can overwrite it */ \
+            if (j > 0 && j % TILE_CP_STEP == 0 && j / TILE_CP_STEP <= ncp) \
+                cps->data[j / TILE_CP_STEP - 1].off = cur; \
+            dst[j] = (T)(nxt - cur); \
+            cur = nxt; \
+        } \
+        void* p = realloc(a->data, (a->count + 2) * sizeof(T)); /* +2: spare entries the parse reads ahead */ \
+        if (p) a->data = p; \
+        dst = (T*)a->data; \
+        dst[a->count - 1] = dst[a->count] = dst[a->count + 1] = 0; \
+    } while (0)
+    if (usewide) COMPACT_TABLE(int64_t);
+    else COMPACT_TABLE(uint32_t);
+    #undef COMPACT_TABLE
 }
 
 int LoadMIDI(const char* filepath)
 {
     UnloadMIDI();
     trackAmount = 0, totalnotes = 0, eventcount = 0, bytecount = 0, playednotes = 0, maxTick = 0;
-    g_trace = env_flag("SHARKMIDI_TRACE");
-    g_tile_set = 0;
-    if (getenv("SHARKMIDI_TILE_KB") && atoi(getenv("SHARKMIDI_TILE_KB")) > 0)
-    {
-        g_tile_kb = atoi(getenv("SHARKMIDI_TILE_KB"));
-        g_tile_set = 1;
-    }
-    tr = (TraceTimes){0};
     updatestatsandprint("initiating memory mapped file\n");
     
     if (!InitMMF(filepath)) 
@@ -1713,9 +1588,7 @@ int LoadMIDI(const char* filepath)
     double start = get_time();
     int32_t loadedtracks = 0;
     
-    #ifdef _OPENMP
-        #pragma omp parallel for schedule(dynamic, 1)
-    #endif
+    OMP_PARALLEL_FOR
     for(int32_t i = 0; i < trackAmount; i++)
     {
         trackProperties* currtrack = &tracks.data[i];
@@ -1726,7 +1599,7 @@ int LoadMIDI(const char* filepath)
         ATOMIC_ADD(eventcount, trackev);
         ATOMIC_ADD(bytecount, trackbytes);
         TrackEsc_arr_shrink(&g_esc[i]);
-        TrackTick_arr_shrink(&histogram[i]); // drop the doubling slack, only tracks still being counted keep any
+        TrackTick_arr_shrink(&histogram[i]);
         ATOMIC_ADD(loadedtracks, 1);
         printf("(%s/%s) tracks scanned, %s notes counted\r", AddCommas(loadedtracks), AddCommas(trackAmount), AddCommas(totalnotes));
     }
@@ -1750,7 +1623,6 @@ int LoadMIDI(const char* filepath)
         usedtracks += histogram[i].count > 0;
 
     updatestatsandprint("merging per track timing into main timing array and track RLE\n");
-    double trmark = g_trace ? get_time() : 0.0;
     timingArr = calloc(activetickcount + 1, sizeof(TickGroup));
     if (trackcolors)
     {
@@ -1761,7 +1633,6 @@ int LoadMIDI(const char* filepath)
         if (!trackGroups.runs || !trackGroups.tracks || !trackGroups.anchors)
             tg_drop("out of memory for the track index");
     }
-    TR_LAP(mainalloc, trmark);
     int merged = 0;
     // the rank merge needs 4 (8 with track colors) bytes per distinct tick on top, only worth it when ticks are shared
     double mergestart = get_time();
@@ -1771,28 +1642,20 @@ int LoadMIDI(const char* filepath)
         merge_timing(histogram, trackAmount, 1);
     free(tickbits);
     mergetime = get_time() - mergestart;
-    trmark = g_trace ? get_time() : 0.0;
-
     int64_t* startOffsets = malloc((trackAmount + 1) * sizeof(int64_t));
     uint8_t* wide = calloc(trackAmount + 1, 1); // tracks that keep 8 byte offsets
-    #ifdef _OPENMP
-        #pragma omp parallel for schedule(dynamic, 1)
-    #endif
+    OMP_PARALLEL_FOR
     for (int32_t i = 0; i < trackAmount; i++)
         compact_offsets(&histogram[i], &startOffsets[i], &wide[i], &cps[i], i);
-    TR_LAP(compact, trmark);
 
     updatestatsandprint("creating main event array\n");
     eventArr = calloc(bytecount + 8, 1); // 8 spare bytes: nothing reads them, they keep a decoder's lookahead inside the allocation
-    TR_LAP(evalloc, trmark);
 
     loadedtracks = 0;
     updatestatsandprint("actually parsing events this time\n");
     start = get_time();
     
-    #ifdef _OPENMP
-        #pragma omp parallel for schedule(dynamic, 1)
-    #endif
+    OMP_PARALLEL_FOR
     for(int32_t i = 0; i < trackAmount; i++)
     {
         if (track_is_tiled(&histogram[i]))
@@ -1815,7 +1678,6 @@ int LoadMIDI(const char* filepath)
     free(cps);
     end = get_time();
 
-    trmark = g_trace ? get_time() : 0.0;
     free(histogram);
     free(g_esc); g_esc = NULL;
     free(g_shape); g_shape = NULL;
@@ -1830,9 +1692,9 @@ int LoadMIDI(const char* filepath)
     SysExEvent_arr_push(&sysexs, sex);
 
     parsetime = end - start;
-    qsort(tempos.data, tempos.count, sizeof(TempoEvent), cmp_tempo);
+    qsort(tempos.data, tempos.count, sizeof(TempoEvent), cmp_tick);
     finalize_timesigs();
-    qsort(sysexs.data, sysexs.count, sizeof(SysExEvent), cmp_sysex);
+    qsort(sysexs.data, sysexs.count, sizeof(SysExEvent), cmp_tick);
     tempoArr = tempos.data;
     sysexArr = sysexs.data;
     tempoCount = tempos.count;
@@ -1845,10 +1707,7 @@ int LoadMIDI(const char* filepath)
     retire_filename();
     owned_filename = (char*)getfilename(filepath);
     filename = owned_filename;
-    TR_LAP(tail, trmark);
     printparsestatistics();
-    if (g_trace)
-        printtrace();
     return midiloaded;
 }
 
@@ -1874,14 +1733,7 @@ void UnloadMIDI(void)
     SysExEvent_arr_free(&sysexs);
     free(eventArr);
     free(timingArr);
-    // trackcolors can be toggled between load and unload, so key off the pointer
-    free(trackGroups.runs);
-    free(trackGroups.tracks);
-    free(trackGroups.anchors);
-    trackGroups.runs = NULL;
-    trackGroups.tracks = NULL;
-    trackGroups.anchors = NULL;
-    trackGroups.count = 0;
+    tg_free(); // trackcolors can be toggled between load and unload, so key off the pointer
     sysexArr = NULL;
     tempoArr = NULL;
     timesigArr = NULL;

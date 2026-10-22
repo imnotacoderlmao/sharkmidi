@@ -9,8 +9,6 @@
 "    int uViewEnd;\n" \
 "    int uCurrentTick;\n" \
 "    int uTransparencyEnabled;\n" \
-"    int uDepthEnabled;\n" \
-"    int uTrackCount;\n" \
 "};\n"
 
 static const char* QuadVertSrc =
@@ -32,10 +30,7 @@ FRAME_BLOCK
 "    vColor = texelFetch(uPalette, int((aPackedData >> 16) & 0xFFu), 0);\n"
 "    vIsActive = (uCurrentTick >= aStartTick && uCurrentTick <= endTick) ? 1 : 0;\n"
 "    opacity = float(((aPackedData & 0xFFu) + 1u)) / 128.0;\n"
-"    uint rank = min(((aPackedData >> 24) << 4) | ((aPackedData >> 20) & 15u), uint(uTrackCount - 1));\n"
-"    float tie = float(uint(uTrackCount - 1) - rank) / float(uTrackCount);\n"
-"    float z = uDepthEnabled == 1 ? tie * 2.0 - 1.0 : 0.0; // track priority: the higher track in front\n"
-"    gl_Position = vec4(x, y, z, 1.0);\n"
+"    gl_Position = vec4(x, y, 0, 1.0);\n"
 "}\n";
 
 static const char* QuadFragSrc =

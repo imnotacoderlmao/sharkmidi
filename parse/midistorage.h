@@ -16,29 +16,9 @@ typedef struct
     int64_t event_offset; // in bytes
 } TickGroup;
 
-// decodes the runs in [p, end) of eventArr: ev[0..2] is the event as the old 3 byte entries had it
-#define EV_RUNS(p, end, ev, BODY)                                              \
-    do {                                                                       \
-        const uint8_t* ev_p_ = (p);                                            \
-        const uint8_t* ev_end_ = (end);                                        \
-        while (ev_p_ < ev_end_)                                                \
-        {                                                                      \
-            uint8_t ev[3];                                                     \
-            ev[0] = ev_p_[0];                                                  \
-            ev[2] = ev_p_[1];                                                  \
-            ev_p_ += 2;                                                        \
-            uint8_t ev_n_;                                                     \
-            do {                                                               \
-                ev_n_ = *ev_p_++;                                              \
-                ev[1] = ev_n_ & 0x7F;                                          \
-                BODY                                                           \
-            } while (!(ev_n_ & 0x80));                                         \
-        }                                                                      \
-    } while (0)
-
-// the same walk with the run's status and third byte visible: RUN is executed once per run, before its events,
-// BODY once per event with its note in key
-#define EV_RUNS_EX(p, end, st, third, key, RUN, BODY)                          \
+// walks the runs in [p, end) of eventArr: RUN is executed once per run, before its events, with the run's status and
+// third byte in st and third, BODY once per event with its note in key (the event is st, key, third, as a midi message)
+#define EV_RUNS(p, end, st, third, key, RUN, BODY)                          \
     do {                                                                       \
         const uint8_t* ev_p_ = (p);                                            \
         const uint8_t* ev_end_ = (end);                                        \

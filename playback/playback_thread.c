@@ -155,18 +155,12 @@ static void update_playback_stats(void)
     smoothed_midifps += alpha * (midifps - smoothed_midifps);
     notespersec = (int64_t)smoothed_nps;
 
+    printf("tick: %s / %s | notes: %s / %s (%s/s) | bpm: %.2lf | midi thread: %10s fps",
+        AddCommas(current_clock), AddCommas(maxTick), AddCommas(playednotes), AddCommas(totalnotes),
+        AddCommas(notespersec), bpm, AddCommas(smoothed_midifps));
     if (voicefetching)
-    {
-        printf("tick: %s / %s | notes: %s / %s (%s/s) | bpm: %.2lf | midi thread: %10s fps | %s voices    \r", 
-            AddCommas(current_clock), AddCommas(maxTick), AddCommas(playednotes), AddCommas(totalnotes), 
-            AddCommas(notespersec), bpm, AddCommas(smoothed_midifps), AddCommas(KDMAPI_GetVoiceCount()));  
-    }
-    else
-    {
-        printf("tick: %s / %s | notes: %s / %s (%s/s) | bpm: %.2lf | midi thread: %10s fps    \r", 
-            AddCommas(current_clock), AddCommas(maxTick), AddCommas(playednotes), AddCommas(totalnotes), 
-            AddCommas(notespersec), bpm, AddCommas(smoothed_midifps));
-    }
+        printf(" | %s voices", AddCommas(KDMAPI_GetVoiceCount()));
+    fputs("    \r", stdout);
     laststatsupdate = noww;
 }
 
@@ -214,7 +208,6 @@ void Playback_StopAndWait(void)
     while (atomic_load(&playback_running))
         os_sleep_ms(1);
 }
-//#define SHARKMIDI_BATCH_INTO_LONGMSG
 
 void StartPlayback(int singlethread)
 {
@@ -258,36 +251,16 @@ void StartPlayback(int singlethread)
         while (timing->tick <= clock)
         {
             int64_t count = (timing + 1)->event_offset;
+            // the message is built from the run's status and third byte, and each event's note
             if (!singlethread)
             {
-                EV_RUNS(eventptr + played, eventptr + count, ev, 
-                    ringbuffer[rbpos++ & RINGBUFFER_MASK] = uint24_from((ev[0] | (ev[1] << 8) | (ev[2] << 16)));
-                );
+                EV_RUNS(eventptr + played, eventptr + count, st, third, key, const uint32_t head = st | (third << 16);,
+                    ringbuffer[rbpos++ & RINGBUFFER_MASK] = uint24_from((int)(head | (key << 8))););
                 atomic_store_explicit(&writeptr, (uint32_t)(rbpos & RINGBUFFER_MASK), memory_order_release);
             }
             else
-            {
-#ifdef SHARKMIDI_BATCH_INTO_LONGMSG
-                // hmm...
-                uint8_t buffer[65535]; 
-                size_t bytes = 0;
-                EV_RUNS(eventptr + played, eventptr + count, ev, 
-                {
-                    buffer[bytes++] = ev[0]; 
-                    buffer[bytes++] = ev[1]; 
-                    buffer[bytes++] = ev[2];
-                    if (bytes == sizeof(buffer)) 
-                    { 
-                        SubmitSysEx((SysExEvent){current_clock, bytes, buffer}); 
-                        bytes = 0; 
-                    }
-                });
-                if (bytes) 
-                    SubmitSysEx((SysExEvent){current_clock, bytes, buffer});
-#else
-                EV_RUNS(eventptr + played, eventptr + count, ev, { KDMAPI_SendDirectData((uint32_t)(ev[0] | (ev[1] << 8) | (ev[2] << 16))); });
-#endif
-            }
+                EV_RUNS(eventptr + played, eventptr + count, st, third, key, const uint32_t head = st | (third << 16);,
+                    KDMAPI_SendDirectData(head | (key << 8)););
             played = count;
             // this feels frankenstein, but its a way for smooth scrolling under throttle
             current_clock = timing->tick;

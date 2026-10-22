@@ -83,6 +83,12 @@ static void spawn_loading_thread(const char* filepath) { spawn_thread(loading_th
 
 static GLFWwindow* win;
 
+static void ensure_synth(void)
+{
+    if (!issynthinitiated)
+        Sound_Init(singlethread);
+}
+
 static void glfw_error_callback(int code, const char* desc)
 {
     fprintf(stderr, "GLFW error %d: %s\n", code, desc);
@@ -101,8 +107,7 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
         {
             if (stopping)
             {
-                if (!issynthinitiated) 
-                    Sound_Init(singlethread);
+                ensure_synth();
                 spawn_playback_thread(singlethread);
             }
             else
@@ -118,11 +123,6 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
             EnableGlow = !EnableGlow;
         if (key == GLFW_KEY_T)
             EnableTransparency = !EnableTransparency;
-        if (key == GLFW_KEY_O)
-        {
-            UseDepthOrder = !UseDepthOrder;
-            printf("track ordering is %s\n", UseDepthOrder ? "TRUE" : "FALSE");
-        }
         if (key == GLFW_KEY_C)
         {
             trackcolors = !trackcolors;
@@ -208,8 +208,7 @@ static void drop_callback(GLFWwindow* w, int count, const char** paths)
     }
     else
     {
-        if (!issynthinitiated) 
-            Sound_Init(singlethread);
+        ensure_synth();
         playlist_t* heap_playlistptr = malloc(sizeof(playlist_t));
         heap_playlistptr->count = count;
         heap_playlistptr->filedirs = malloc(sizeof(char*) * count);
@@ -291,7 +290,6 @@ int Window_Init(void)
 
 void Window_Run(const char* filepath)
 {
-    Renderer_SetProcLoader((void* (*)(const char*))glfwGetProcAddress);
     Renderer_Init();
     Text_Init();
     if (filepath != NULL && LoadMIDI(filepath))
