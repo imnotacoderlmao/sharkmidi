@@ -122,7 +122,10 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
         if (key == GLFW_KEY_G)
             EnableGlow = !EnableGlow;
         if (key == GLFW_KEY_T)
+        {
             EnableTransparency = !EnableTransparency;
+            EnableTransparency? glEnable(GL_BLEND) : glDisable(GL_BLEND);
+        }
         if (key == GLFW_KEY_C)
         {
             trackcolors = !trackcolors;
@@ -283,7 +286,6 @@ int Window_Init(void)
 
     printf("GL_VERSION: %s\n", glGetString(GL_VERSION));
     printf("GL_RENDERER: %s\n", glGetString(GL_RENDERER));
-    glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     return 1;
 }

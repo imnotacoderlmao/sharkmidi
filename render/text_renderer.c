@@ -1,4 +1,5 @@
 #include "text_renderer.h"
+#include "shaders.h"
 #include "renderer.h"
 #define STB_EASY_FONT_IMPLEMENTATION
 #include "../third_party/stb_easy_font.h"
@@ -34,12 +35,18 @@ static GLuint textShader;
 static GLint u_screenSize;
 static GLuint textVAO, textVBO, textEBO;
 
-static TextVertex vertexBuf[MAX_TOTAL_QUADS * 4];
+// allocated in Text_Init: static arrays of this size are stored in the exe on mingw
+static TextVertex* vertexBuf;
+struct TempVert { float x, y, z; unsigned char col[4]; };
+#define TEMP_QUADS 512
+static struct TempVert* tempBuf;
 static int totalQuads = 0;
 
 void Text_Init(void)
 {
-    textShader = build_shader(TextVertSrc, TextFragSrc);
+    vertexBuf = (TextVertex*)malloc(MAX_TOTAL_QUADS * 4 * sizeof(TextVertex));
+    tempBuf = (struct TempVert*)malloc(TEMP_QUADS * 4 * sizeof(struct TempVert));
+    textShader = build_shader(TextVertSrc, TextFragSrc, 0);
     u_screenSize = glGetUniformLocation(textShader, "uScreenSize");
 
     glGenVertexArrays(1, &textVAO);
@@ -48,7 +55,7 @@ void Text_Init(void)
 
     glBindVertexArray(textVAO);
     glBindBuffer(GL_ARRAY_BUFFER, textVBO);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(vertexBuf), NULL, GL_DYNAMIC_DRAW);
+    glBufferData(GL_ARRAY_BUFFER, MAX_TOTAL_QUADS * 4 * sizeof(TextVertex), NULL, GL_DYNAMIC_DRAW);
     
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, sizeof(TextVertex), (void*)0);
@@ -74,10 +81,12 @@ void Text_Dispose(void)
     glDeleteBuffers(1, &textEBO);
     glDeleteVertexArrays(1, &textVAO);
     glDeleteProgram(textShader);
+    free(vertexBuf);
+    free(tempBuf);
+    vertexBuf = NULL;
+    tempBuf = NULL;
 }
 
-struct TempVert { float x, y, z; unsigned char col[4]; };
-static struct TempVert tempBuf[512 * 4];
 void Text_Queue(float x, float y, float scale, float r, float g, float b, const char* fmt, ...)
 {
     if (totalQuads >= MAX_TOTAL_QUADS) return;
@@ -93,7 +102,7 @@ void Text_Queue(float x, float y, float scale, float r, float g, float b, const 
             *c = '?';
 
     unsigned char color[4] = { (unsigned char)(r*255), (unsigned char)(g*255), (unsigned char)(b*255), 255 };
-    int numQuads = stb_easy_font_print(0, 0, str, color, tempBuf, sizeof(tempBuf));
+    int numQuads = stb_easy_font_print(0, 0, str, color, tempBuf, TEMP_QUADS * 4 * sizeof(struct TempVert));
     if (numQuads <= 0) return;
     if (totalQuads + numQuads > MAX_TOTAL_QUADS) numQuads = MAX_TOTAL_QUADS - totalQuads;
 
