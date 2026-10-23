@@ -54,7 +54,8 @@ static GLuint vao, cursorVAO, vboBuffer, paletteTex, ringTex, patchVbo, patchVao
 #define PAGE_NOTES (1 << PAGE_SHIFT)
 #define PAGE_MASK (PAGE_NOTES - 1)
 #define MAX_POOL_PAGES (1 << 17)      // 2^29 notes
-static RenderNote batch[BATCH_NOTES]; // new notes on their way to video memory, the last batchN notes before noteHead
+static RenderNote* batch;             // BATCH_NOTES of them, allocated at run time (a static array of this size is stored in the exe on mingw)
+// new notes on their way to video memory, the last batchN notes before noteHead
 static int batchN;
 typedef struct { int32_t phys; int32_t open; int32_t maxEnd; } PageInfo; // phys -1: freed
 static PageInfo* pages;               // pages[i] is the page numbered pageOrigin + i, entries before pageLo are freed
@@ -63,7 +64,8 @@ static int64_t noteHead;              // number of the next note, a note's page 
 static int poolPages;                 // pages the video memory buffer has room for
 static int growFailed;
 static int deferredRingCap = -1;
-static int freeQ[MAX_POOL_PAGES], freeHead, freeCount; // free physical pages, oldest first
+static int* freeQ;                    // MAX_POOL_PAGES entries, allocated at run time
+static int freeHead, freeCount;       // free physical pages, oldest first
 static inline void freeq_push(int phys) { freeQ[(freeHead + freeCount++) & (MAX_POOL_PAGES - 1)] = phys; }
 typedef struct { uint32_t word, end; } Patch; // word: where the EndTick is in the buffer, in 32 bit words
 static Patch* patches;
@@ -84,6 +86,14 @@ static uint32_t maxTrackSeen; // highest track (capped at MAX_RANK) a sweep has 
 static KbChunk* kbChunks;
 static int kbChunkCount, kbChunkCap;
 static int kbUsed;           // blocks used in the last chunk
+
+// notes that are already sounding where a full sweep starts (see restore_sounding). tick is the start of the note,
+// pos orders notes of one tick back into file order, unmatched is how many note ons of the key are still open
+typedef struct { int64_t tick; int64_t pos; uint32_t track; uint32_t unmatched; uint8_t st, key, vel; } Sounding;
+typedef struct { int64_t tick; uint32_t track; uint8_t st, key, third; } RevEvent;
+static Sounding* snd;
+static RevEvent* rev;
+static int64_t sndN, sndCap, revCap;
 
 static void kb_release(void)
 {
@@ -434,6 +444,14 @@ void Renderer_Init(void)
 {
     if (isInitialized) return;
 
+    if (!batch) batch = (RenderNote*)malloc(BATCH_NOTES * sizeof(RenderNote));
+    if (!freeQ) freeQ = (int*)malloc(MAX_POOL_PAGES * sizeof(int));
+    if (!batch || !freeQ)
+    {
+        fprintf(stderr, "out of memory for the renderer\n");
+        exit(1);
+    }
+
     quadShader = build_shader(QuadVertSrc, QuadFragSrc);
     cursorShader = build_shader(CursorVertSrc, CursorFragSrc);
     glGenVertexArrays(1, &cursorVAO); 
@@ -490,8 +508,13 @@ void Renderer_Dispose(void)
     kb_release();
     free(pages);
     free(patches);
+    free(snd);
+    free(rev);
     pages = NULL;
     patches = NULL;
+    snd = NULL;
+    rev = NULL;
+    sndN = sndCap = revCap = 0;
     pageCap = patchCap = pageLo = pageHi = pageOrigin = livePages = 0;
     glDeleteBuffers(1, &vboBuffer);
     glDeleteBuffers(1, &patchVbo);
@@ -504,6 +527,10 @@ void Renderer_Dispose(void)
     glDeleteProgram(scatterShader);
     glDeleteProgram(quadShader);
     glDeleteProgram(cursorShader);
+    free(batch);
+    free(freeQ);
+    batch = NULL;
+    freeQ = NULL;
 }
 
 static void __attribute__((noinline)) batch_full(int* bn)
@@ -589,6 +616,157 @@ static int64_t find_active_tick_idx(int64_t targetTick)
     return ans;
 }
 
+
+// ---- sounding notes at the start of a full sweep ------------------------------------------------------------------
+// a full sweep (seek, zoom, jump back) used to start one window before the view, so a note that started earlier and is
+// still sounding was never loaded. restore_sounding rebuilds those notes by reading the events before idx0 backwards:
+// per key, a note off is a pending off, a note on with a pending off cancels it, a note on with nothing pending is
+// still sounding (with nested ons the earliest unmatched one started the note, the number of them is the key's count,
+// as in process_one_event). the notes go into the pages first, in start order, then the normal sweep goes on from the view.
+// only RENDER_BACK_BYTES of events (or twice the swept window, if bigger) are read back: a note that is still sounding
+// from before that is missed
+#ifndef RENDER_BACK_BYTES
+#define RENDER_BACK_BYTES (16 << 20)
+#endif
+#ifndef BACK_CHUNK
+#define BACK_CHUNK (256 << 10)
+#endif
+
+static inline KeyHeader* kb_block(uint32_t track, uint32_t channel)
+{
+    if (UNLIKELY(track >= (uint64_t)kbTracks)) kb_grow(track);
+    KeyHeader** slot = &kbTab[((int64_t)track << 4) | channel];
+    if (UNLIKELY(!*slot)) *slot = kb_alloc();
+    return *slot;
+}
+
+static void __attribute__((noinline)) rev_grow(void)
+{
+    revCap = revCap ? revCap * 2 : (1 << 16);
+    rev = (RevEvent*)realloc(rev, (size_t)revCap * sizeof(RevEvent));
+}
+
+static int cmp_sounding(const void* a, const void* b)
+{
+    const Sounding* x = (const Sounding*)a;
+    const Sounding* y = (const Sounding*)b;
+    if (x->tick != y->tick) return x->tick < y->tick ? -1 : 1;
+    if (x->track != y->track) return x->track < y->track ? -1 : 1;
+    return (x->pos < y->pos) - (x->pos > y->pos); // earlier in the file = larger pos, first
+}
+
+static void restore_sounding(int64_t idx0, int64_t idxEnd)
+{
+    kb_zero();
+    sndN = 0;
+    if (idx0 <= 0 || timingArr == NULL || eventArr == NULL) return;
+    const uint8_t* messages = (const uint8_t*)eventArr;
+    int64_t budget = RENDER_BACK_BYTES;
+    if (idxEnd > idx0)
+    {
+        int64_t window = 2 * (timingArr[idxEnd].event_offset - timingArr[idx0].event_offset);
+        if (window > budget) budget = window;
+    }
+    const int64_t endOff = timingArr[idx0].event_offset;
+    int64_t pos = 0;
+    for (int64_t ce = idx0; ce > 0;)
+    {
+        int64_t cs = ce - 1;
+        while (cs > 0 && timingArr[ce].event_offset - timingArr[cs - 1].event_offset <= BACK_CHUNK) cs--;
+        if (endOff - timingArr[cs].event_offset > budget) break;
+
+        // the chunk, decoded forward
+        int64_t n = 0;
+        int64_t cur = timingArr[cs].event_offset;
+        int64_t gs = 0, gi = 0;
+        const int indexed = trackGroups.runs && trackGroups.count > 0;
+        if (indexed)
+        {
+            gi = tg_find(&trackGroups, cur, &gs);
+            while ((gi < trackGroups.count) && (gs + trackGroups.runs[gi] <= cur))
+                gs += trackGroups.runs[gi++];
+        }
+        for (int64_t idx = cs; idx < ce; idx++)
+        {
+            const int64_t tick = timingArr[idx].tick;
+            const int64_t nextOffset = timingArr[idx + 1].event_offset;
+            while (cur < nextOffset)
+            {
+                uint32_t track = 0;
+                int64_t groupEnd = nextOffset;
+                if (indexed && gi < trackGroups.count)
+                {
+                    track = trackGroups.tracks[gi];
+                    groupEnd = gs + trackGroups.runs[gi];
+                }
+                int64_t runEnd = groupEnd < nextOffset ? groupEnd : nextOffset;
+                // the body is one parenthesised expression: a macro argument splits at every comma outside ()
+                EV_RUNS(messages + cur, messages + runEnd, st, third, key, ,
+                {
+                    if (UNLIKELY(n == revCap)) rev_grow();
+                    rev[n++] = ((RevEvent){tick, track, (uint8_t)st, (uint8_t)key, (uint8_t)third});
+                });
+                cur = runEnd;
+                if (indexed && gi < trackGroups.count && cur >= groupEnd)
+                {
+                    gs = groupEnd;
+                    gi++;
+                }
+            }
+        }
+
+        // the same events, last first
+        for (int64_t i = n - 1; i >= 0; i--, pos++)
+        {
+            const RevEvent* e = &rev[i];
+            const uint32_t statusHigh = e->st & 0xF0u;
+            if (statusHigh != 0x90 && statusHigh != 0x80) continue;
+            // count: note offs still to be matched. slot: 1 + the index of its sounding note
+            KeyHeader* k = &kb_block(e->track, e->st & 0x0Fu)[e->key];
+            if (statusHigh == 0x80)
+                k->count++;
+            else if (k->count > 0)
+                k->count--;
+            else
+            {
+                if (k->slot == 0)
+                {
+                    if (UNLIKELY(sndN == sndCap))
+                    {
+                        sndCap = sndCap ? sndCap * 2 : 1024;
+                        snd = (Sounding*)realloc(snd, (size_t)sndCap * sizeof(Sounding));
+                    }
+                    snd[sndN] = (Sounding){0};
+                    k->slot = (uint32_t)++sndN;
+                }
+                Sounding* sn = &snd[k->slot - 1];
+                sn->unmatched++;
+                sn->tick = e->tick; // an earlier one than the last, it is the one that started the note
+                sn->pos = pos;
+                sn->track = e->track;
+                sn->st = e->st;
+                sn->key = e->key;
+                sn->vel = e->third;
+            }
+        }
+        ce = cs;
+    }
+
+    kb_zero();
+    if (sndN == 0) return;
+    qsort(snd, (size_t)sndN, sizeof(Sounding), cmp_sounding);
+    int bn = batchN;
+    for (int64_t i = 0; i < sndN; i++)
+    {
+        const Sounding* sn = &snd[i];
+        KeyHeader* k = &kb_block(sn->track, sn->st & 0x0Fu)[sn->key];
+        const uint32_t color = ((sn->track & 15) << 4) | (sn->st & 0x0F);
+        process_one_event(k, 0x90, sn->key, sn->vel, color, sn->tick, &bn);
+        k->count = (int32_t)sn->unmatched;
+    }
+    batchN = bn;
+    flush_batch();
+}
 
 static void sweep_range(int64_t fromTick, int64_t toTick)
 {
@@ -791,8 +969,8 @@ void Renderer_Render(int32_t tick, int pad)
     if (!incremental)
     {
         ring_reset();
-        kb_zero();
-        sweep_range(MAX(viewStart - WindowTicks, 0), sweepEnd);
+        restore_sounding(find_active_tick_idx(viewStart), find_active_tick_idx((int64_t)sweepEnd + 1)); // notes already sounding at the view
+        sweep_range(viewStart, sweepEnd);
     }
     else
     {

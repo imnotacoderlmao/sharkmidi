@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
+
 int64_t playednotes = 0, playednotes2 = 0, notespersec = 0;
 double now = 0.0, last = 0.0, delta = 0.0, tick = 0.0;
 double laststatsupdate = 0.0, bpm = 120.0, tickscale = 0.0;
@@ -18,7 +19,7 @@ int64_t current_clock = 0;
 #define onesixtyh 0.016666666
 static atomic_int playback_running = 0;
 _Atomic double playback_next_due = 0.0;
-static _Atomic int64_t pending_skip = 0; // ticks the windower adds to skip so anything important like tempo resync n stuff happens on one thread
+static _Atomic int64_t pending_skip = 0;
 
 static TempoEvent* g_tempo_cursor = NULL;
 #define MAX_SLEEP_US 2000
@@ -85,7 +86,6 @@ double clock_getTick(void)
     last = now;
     if (paused) { os_sleep_ms(1); return tick; }
     double remaining = MIN(delta, onesixtyh);
-    // for tick to not jump too much when you have microsecond tempo changes or something
     while (remaining > 0.0)
     {
         double ticks_to_next_tempo = g_tempo_cursor->tick - tick;
@@ -104,7 +104,6 @@ double clock_getTick(void)
     return tick;
 }
 
-// called from the UI thread, the actual seek happens in clock_getTick so the tempo cursor has a single owner
 void clock_skip(double ticks)
 {
     atomic_fetch_add(&pending_skip, (int64_t)ticks);
@@ -150,7 +149,7 @@ static void update_playback_stats(void)
     double instant_nps = (double)delta_notes / dt;
     playednotes2 = playednotes;
 
-    double alpha = 1.0 - exp(-dt * 2.0); // equivalent to dividing by 0.5 for a 0.5s window
+    double alpha = 1.0 - exp(-dt * 2.0);
     smoothed_nps += alpha * (instant_nps - smoothed_nps);
     smoothed_midifps += alpha * (midifps - smoothed_midifps);
     notespersec = (int64_t)smoothed_nps;
@@ -164,7 +163,6 @@ static void update_playback_stats(void)
     laststatsupdate = noww;
 }
 
-// called from both the playback thread and the render loop, whoever loses the race just skips this update - Copy
 static atomic_flag stats_busy = ATOMIC_FLAG_INIT;
 void UpdatePlaybackStats(void)
 {
@@ -190,7 +188,7 @@ void SubmitSysEx(SysExEvent sysex)
         if (prepare == 0)
         {
             send = KDMAPI_SendDirectLongData(&header, size);
-            while ((unprepare = KDMAPI_UnprepareLongData(&header, size)) == 65 && send == 0) // MIDIERR_STILLPLAYING
+            while ((unprepare = KDMAPI_UnprepareLongData(&header, size)) == 65 && send == 0)
                 os_sleep_ms(1);
         }
         if (prepare != 0 || send != 0 || unprepare != 0)
@@ -218,10 +216,9 @@ void StartPlayback(int singlethread)
     }
     if (!issynthinitiated) { puts("no synth initiated!!!!!!!"); return; }
     if (atomic_exchange(&playback_running, 1))
-        return; // already playing
+        return;
     playednotes = 0, playednotes2 = 0;
     const uint8_t* eventptr = eventArr;
-    int64_t rbpos = 0; // events written to the ring so far, the ring is indexed by this, not by the byte offsets of eventArr
     timing = timingArr;
     g_tempo_cursor = tempoArr;
     SysExEvent* sysex = sysexArr;
@@ -230,7 +227,6 @@ void StartPlayback(int singlethread)
     os_timer_init();
     if (getenv("SHARKMIDI_SPIN_US"))
         spin_margin = atof(getenv("SHARKMIDI_SPIN_US")) * 1e-6;
-    // stopping drops to 0 only after everything the stats/render side dereferences is set up
     stopping = 0;
     if (!singlethread)
         audiothread_entry();
@@ -246,23 +242,18 @@ void StartPlayback(int singlethread)
             while (sysex > sysexArr && sysex->tick > clock)
                 sysex--;
             if (!singlethread)
-                memset(ringbuffer, 0, RINGBUFFER_SIZE * sizeof(uint24_t));
+                Sound_Flush();
         }
         while (timing->tick <= clock)
         {
             int64_t count = (timing + 1)->event_offset;
-            // the message is built from the run's status and third byte, and each event's note
             if (!singlethread)
-            {
-                EV_RUNS(eventptr + played, eventptr + count, st, third, key, const uint32_t head = st | (third << 16);,
-                    ringbuffer[rbpos++ & RINGBUFFER_MASK] = uint24_from((int)(head | (key << 8))););
-                atomic_store_explicit(&writeptr, (uint32_t)(rbpos & RINGBUFFER_MASK), memory_order_release);
-            }
+                Sound_Send(eventptr + played, eventptr + count);
             else
-                EV_RUNS(eventptr + played, eventptr + count, st, third, key, const uint32_t head = st | (third << 16);,
-                    KDMAPI_SendDirectData(head | (key << 8)););
+                EV_RUNS(eventptr + played, eventptr + count, st, third, key, const uint32_t head = st | (third << 16);
+                        ,KDMAPI_SendDirectData(head | (key << 8)););
+
             played = count;
-            // this feels frankenstein, but its a way for smooth scrolling under throttle
             current_clock = timing->tick;
             UpdatePlaybackStats();
             timing++;
