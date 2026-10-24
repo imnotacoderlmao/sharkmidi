@@ -144,7 +144,11 @@ static void* audiothread(void* args)
             if (wake > now)
                 os_sleep_until(wake);
             else
-                os_cpu_relax();
+            {
+                // the next packet is about to be written: poll the ring between pauses, the clock only now and then
+                for (int i = 0; i < 16 && atomic_load_explicit(&ring_w, memory_order_relaxed) == r; i++)
+                    os_cpu_relax();
+            }
         }
         else
             os_sleep_until(now + DEFAULT_IDLE_US * 1e-6);

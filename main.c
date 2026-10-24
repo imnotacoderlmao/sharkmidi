@@ -5,7 +5,7 @@
 int main(int argc, char* argv[])
 {
     char welcome[] = 
-    "========== sharkmidi commit #35 ==========\n"
+    "========== sharkmidi commit #36 ==========\n"
     "optionally, you could add a file path after the executable for the it to load a midi immediately, like:\n"
     "   ./sharkmidi (single threaded playback) (midi file directory)\n"
     "controls are:\n"   
@@ -25,7 +25,7 @@ int main(int argc, char* argv[])
     "===========================================";
     
     puts(welcome);
-    
+
     setbuf(stdout, NULL); // just for printf to print everytime its called
     singlethread = (argv[1] != NULL && strcmp(argv[1], "false") == 0)? 0 : 1;
     if (!Window_Init())

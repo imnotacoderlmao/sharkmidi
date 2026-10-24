@@ -8,6 +8,11 @@ IS_MINGW = $(shell $(CC) -dumpmachine 2>&1 | grep -E "mingw|w64")
 native = $(shell echo $(do_compile_native) | tr A-Z a-z)
 do_openmp = $(shell echo $(multiprocessing) | tr A-Z a-z)
 dbg = $(shell echo $(debug) | tr A-Z a-z)
+tsc = $(shell echo $(use_tsc) | tr A-Z a-z)
+
+ifeq (${tsc}, true)
+    CFLAGS += -DUSE_TSC_CLOCK
+endif
 
 ifeq (${dbg},true)
     CFLAGS = -g -O0 -ffunction-sections -fdata-sections -fno-omit-frame-pointer -fsanitize=address -fsanitize=undefined

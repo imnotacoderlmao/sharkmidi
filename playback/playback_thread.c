@@ -1,6 +1,7 @@
 #include "../parse/midistorage.h"
 #include "../parse/parser.h"
 #include "../misc/util.h"
+#define TIMER_IMPL // the shared tsc calibration lives here (-DUSE_TSC_CLOCK)
 #include "timer.h"
 #include "../synth/sound.h"
 #include "../third_party/conmidi_digit_formatter.h"
@@ -24,19 +25,19 @@ static TempoEvent* g_tempo_cursor = NULL;
 
 static void wait_for_next_tick(int64_t due)
 {
-    double time_to_due = (double)(due - tick) / tickscale;
-    if (time_to_due < spin_margin)
+    double ticks_to_due = (double)due - tick;
+    if (ticks_to_due < spin_margin * tickscale)
     {
         static int64_t published = -1; // the moment the next group is due, handed to the audio thread once per group, not once per spin
         if (due != published)
         {
-            atomic_store_explicit(&playback_next_due, last + time_to_due, memory_order_relaxed);
+            atomic_store_explicit(&playback_next_due, last + ticks_to_due / tickscale, memory_order_relaxed);
             published = due;
         }
         return;
     }
 
-    double dt = time_to_due;
+    double dt = ticks_to_due / tickscale;
     if (g_tempo_cursor->tick > tick)
     {
         double to_tempo = (g_tempo_cursor->tick - tick) / tickscale;
@@ -83,7 +84,7 @@ static void resync_tempo_cursor(void)
     }
 }
 
-double clock_getTick(void)
+static inline double clock_getTick(void)
 {
     if (pending_skip)
     {
@@ -96,6 +97,12 @@ double clock_getTick(void)
     last = now;
     if (paused) { os_sleep_ms(1); return tick; }
     double remaining = MIN(delta, onesixtyh);
+    const double advance = remaining * tickscale;
+    if (g_tempo_cursor->tick - tick > advance)
+    {
+        tick += advance;
+        return tick;
+    }
     while (remaining > 0.0)
     {
         double ticks_to_next_tempo = g_tempo_cursor->tick - tick;
