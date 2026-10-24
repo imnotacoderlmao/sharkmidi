@@ -20,14 +20,12 @@ int64_t current_clock = 0;
 static atomic_int playback_running = 0;
 _Atomic double playback_next_due = 0.0;
 static _Atomic int64_t pending_skip = 0;
-
-static TempoEvent* g_tempo_cursor = NULL;
-#define MAX_SLEEP_US 2000
 static double spin_margin = DEFAULT_SPIN_US * 1e-6;
+static TempoEvent* g_tempo_cursor = NULL;
 
 static void wait_for_next_tick(int64_t clock, int64_t due)
 {
-    if ((due / tickscale) > MAX_TPS_FOR_SPIN) 
+    if ((due / tickscale) < spin_margin) 
         return;
     double target = (double)(due > clock + 1 ? due : clock + 1);
     double dt = (target - tick) / tickscale;

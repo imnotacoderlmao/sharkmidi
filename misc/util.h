@@ -11,5 +11,5 @@
     #define DEFAULT_SPIN_US 60
     #define DEFAULT_IDLE_US 50
 #endif
-#define MAX_TPS_FOR_SPIN (1.0 / (DEFAULT_SPIN_US * 1e-6))
+#define MAX_SLEEP_US 2000
 #endif
