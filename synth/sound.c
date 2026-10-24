@@ -129,6 +129,7 @@ static int send_packet(uint64_t* rp)
 // it wakes AUDIO_SPIN_US early and spins the rest, so events go out as they are written
 static void* audiothread(void* args)
 {
+    (void)args;
     puts("audio thread intialized\n");
     os_timer_init(); // timer slack on Linux is per thread, and the Windows timer handle is per source file
     uint64_t r = 0;

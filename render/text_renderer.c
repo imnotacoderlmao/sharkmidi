@@ -1,4 +1,5 @@
 #include "text_renderer.h"
+#include "shaders.h"
 #include "renderer.h"
 #define STB_EASY_FONT_IMPLEMENTATION
 #include "../third_party/stb_easy_font.h"
@@ -45,12 +46,7 @@ void Text_Init(void)
 {
     vertexBuf = (TextVertex*)malloc(MAX_TOTAL_QUADS * 4 * sizeof(TextVertex));
     tempBuf = (struct TempVert*)malloc(TEMP_QUADS * 4 * sizeof(struct TempVert));
-    if (!vertexBuf || !tempBuf)
-    {
-        fprintf(stderr, "out of memory for the text renderer\n");
-        exit(1);
-    }
-    textShader = build_shader(TextVertSrc, TextFragSrc);
+    textShader = build_shader(TextVertSrc, TextFragSrc, 0);
     u_screenSize = glGetUniformLocation(textShader, "uScreenSize");
 
     glGenVertexArrays(1, &textVAO);

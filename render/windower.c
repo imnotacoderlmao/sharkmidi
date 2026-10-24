@@ -14,7 +14,7 @@
 #include <string.h>
 #include <math.h>
 
-int dynascroll = 0;
+int dynascroll = 0, uivisible = 1, PAD = 20;;
 double scrollfactor = 1.0;
 typedef struct
 {
@@ -121,6 +121,11 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
         }
         if (key == GLFW_KEY_G)
             EnableGlow = !EnableGlow;
+        if (key == GLFW_KEY_H)
+        {
+            uivisible = !uivisible;
+            PAD = uivisible? 20 : 0;
+        }
         if (key == GLFW_KEY_T)
         {
             EnableTransparency = !EnableTransparency;
@@ -301,7 +306,6 @@ void Window_Run(const char* filepath)
         spawn_playback_thread(singlethread);
     }
 
-    const int PAD = 20;
     double smoothed_fps = 0.0;
     glfwSetDropCallback(win, drop_callback);
     glfwSetFramebufferSizeCallback(win, fb_resize_callback); 
@@ -326,13 +330,16 @@ void Window_Run(const char* filepath)
             WindowTicks = (int)(tickscale * scrollfactor);
         
         UpdatePlaybackStats();
-                 
-        Text_Queue(5, 4, 1.75f, 0.0f, 1.0f, 0.0f,
-            "tick: %s | zoom: %d %s | QoS: %s | bpm: %.2f | fps: %s",
-            AddCommas(current_clock), stationarynotes? (int)scrollfactor : WindowTicks, stationarynotes? "bars" : "ticks", AddCommas(NotesDrawnLastFrame), bpm, AddCommas(smoothed_fps));
-        Text_Queue(5, fbHeight - 16, 1.75f, 0.0f, 0.7f, 1.0f,
-            "%s | notes: %s / %s (%s/s)", scrollfilenameifover32characters(filename), AddCommas(playednotes), AddCommas(totalnotes), AddCommas(notespersec));
-        Text_Flush();
+
+        if (uivisible)
+        {
+            Text_Queue(5, 4, 1.75f, 0.0f, 1.0f, 0.0f,
+                "tick: %s | zoom: %d %s | QoS: %s | bpm: %.2f | fps: %s",
+                AddCommas(current_clock), stationarynotes? (int)scrollfactor : WindowTicks, stationarynotes? "bars" : "ticks", AddCommas(NotesDrawnLastFrame), bpm, AddCommas(smoothed_fps));
+            Text_Queue(5, fbHeight - 16, 1.75f, 0.0f, 0.7f, 1.0f,
+                "%s | notes: %s / %s (%s/s)", scrollfilenameifover32characters(filename), AddCommas(playednotes), AddCommas(totalnotes), AddCommas(notespersec));
+            Text_Flush();
+        }
 
         glfwSwapBuffers(win);
         glfwPollEvents();

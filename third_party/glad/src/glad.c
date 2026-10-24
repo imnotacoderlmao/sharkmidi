@@ -272,9 +272,10 @@ int GLAD_GL_VERSION_4_1 = 0;
 int GLAD_GL_VERSION_4_2 = 0;
 PFNGLACTIVETEXTUREPROC glad_glActiveTexture = NULL;
 PFNGLATTACHSHADERPROC glad_glAttachShader = NULL;
+PFNGLBEGINTRANSFORMFEEDBACKPROC glad_glBeginTransformFeedback = NULL;
 PFNGLBINDBUFFERPROC glad_glBindBuffer = NULL;
 PFNGLBINDBUFFERBASEPROC glad_glBindBufferBase = NULL;
-PFNGLBINDIMAGETEXTUREPROC glad_glBindImageTexture = NULL;
+PFNGLBINDBUFFERRANGEPROC glad_glBindBufferRange = NULL;
 PFNGLBINDTEXTUREPROC glad_glBindTexture = NULL;
 PFNGLBINDVERTEXARRAYPROC glad_glBindVertexArray = NULL;
 PFNGLBLENDFUNCPROC glad_glBlendFunc = NULL;
@@ -290,13 +291,13 @@ PFNGLDELETEPROGRAMPROC glad_glDeleteProgram = NULL;
 PFNGLDELETESHADERPROC glad_glDeleteShader = NULL;
 PFNGLDELETETEXTURESPROC glad_glDeleteTextures = NULL;
 PFNGLDELETEVERTEXARRAYSPROC glad_glDeleteVertexArrays = NULL;
-PFNGLDEPTHFUNCPROC glad_glDepthFunc = NULL;
 PFNGLDISABLEPROC glad_glDisable = NULL;
 PFNGLDRAWARRAYSPROC glad_glDrawArrays = NULL;
 PFNGLDRAWARRAYSINSTANCEDBASEINSTANCEPROC glad_glDrawArraysInstancedBaseInstance = NULL;
 PFNGLDRAWELEMENTSPROC glad_glDrawElements = NULL;
 PFNGLENABLEPROC glad_glEnable = NULL;
 PFNGLENABLEVERTEXATTRIBARRAYPROC glad_glEnableVertexAttribArray = NULL;
+PFNGLENDTRANSFORMFEEDBACKPROC glad_glEndTransformFeedback = NULL;
 PFNGLGENBUFFERSPROC glad_glGenBuffers = NULL;
 PFNGLGENTEXTURESPROC glad_glGenTextures = NULL;
 PFNGLGENVERTEXARRAYSPROC glad_glGenVertexArrays = NULL;
@@ -310,11 +311,11 @@ PFNGLGETSTRINGPROC glad_glGetString = NULL;
 PFNGLGETSTRINGIPROC glad_glGetStringi = NULL;
 PFNGLGETUNIFORMLOCATIONPROC glad_glGetUniformLocation = NULL;
 PFNGLLINKPROGRAMPROC glad_glLinkProgram = NULL;
-PFNGLMEMORYBARRIERPROC glad_glMemoryBarrier = NULL;
 PFNGLSHADERSOURCEPROC glad_glShaderSource = NULL;
 PFNGLTEXBUFFERPROC glad_glTexBuffer = NULL;
 PFNGLTEXIMAGE1DPROC glad_glTexImage1D = NULL;
 PFNGLTEXPARAMETERIPROC glad_glTexParameteri = NULL;
+PFNGLTRANSFORMFEEDBACKVARYINGSPROC glad_glTransformFeedbackVaryings = NULL;
 PFNGLUNIFORM1FPROC glad_glUniform1f = NULL;
 PFNGLUNIFORM1IPROC glad_glUniform1i = NULL;
 PFNGLUNIFORM2FPROC glad_glUniform2f = NULL;
@@ -334,7 +335,6 @@ static void load_GL_VERSION_1_0(GLADloadproc load) {
 	glad_glDisable = (PFNGLDISABLEPROC)load("glDisable");
 	glad_glEnable = (PFNGLENABLEPROC)load("glEnable");
 	glad_glBlendFunc = (PFNGLBLENDFUNCPROC)load("glBlendFunc");
-	glad_glDepthFunc = (PFNGLDEPTHFUNCPROC)load("glDepthFunc");
 	glad_glGetError = (PFNGLGETERRORPROC)load("glGetError");
 	glad_glGetIntegerv = (PFNGLGETINTEGERVPROC)load("glGetIntegerv");
 	glad_glGetString = (PFNGLGETSTRINGPROC)load("glGetString");
@@ -394,7 +394,11 @@ static void load_GL_VERSION_2_1(GLADloadproc load) {
 }
 static void load_GL_VERSION_3_0(GLADloadproc load) {
 	if(!GLAD_GL_VERSION_3_0) return;
+	glad_glBeginTransformFeedback = (PFNGLBEGINTRANSFORMFEEDBACKPROC)load("glBeginTransformFeedback");
+	glad_glEndTransformFeedback = (PFNGLENDTRANSFORMFEEDBACKPROC)load("glEndTransformFeedback");
+	glad_glBindBufferRange = (PFNGLBINDBUFFERRANGEPROC)load("glBindBufferRange");
 	glad_glBindBufferBase = (PFNGLBINDBUFFERBASEPROC)load("glBindBufferBase");
+	glad_glTransformFeedbackVaryings = (PFNGLTRANSFORMFEEDBACKVARYINGSPROC)load("glTransformFeedbackVaryings");
 	glad_glVertexAttribIPointer = (PFNGLVERTEXATTRIBIPOINTERPROC)load("glVertexAttribIPointer");
 	glad_glGetStringi = (PFNGLGETSTRINGIPROC)load("glGetStringi");
 	glad_glBindVertexArray = (PFNGLBINDVERTEXARRAYPROC)load("glBindVertexArray");
@@ -405,6 +409,7 @@ static void load_GL_VERSION_3_1(GLADloadproc load) {
 	if(!GLAD_GL_VERSION_3_1) return;
 	glad_glTexBuffer = (PFNGLTEXBUFFERPROC)load("glTexBuffer");
 	glad_glCopyBufferSubData = (PFNGLCOPYBUFFERSUBDATAPROC)load("glCopyBufferSubData");
+	glad_glBindBufferRange = (PFNGLBINDBUFFERRANGEPROC)load("glBindBufferRange");
 	glad_glBindBufferBase = (PFNGLBINDBUFFERBASEPROC)load("glBindBufferBase");
 }
 static void load_GL_VERSION_3_2(GLADloadproc load) {
@@ -423,8 +428,6 @@ static void load_GL_VERSION_4_1(GLADloadproc load) {
 static void load_GL_VERSION_4_2(GLADloadproc load) {
 	if(!GLAD_GL_VERSION_4_2) return;
 	glad_glDrawArraysInstancedBaseInstance = (PFNGLDRAWARRAYSINSTANCEDBASEINSTANCEPROC)load("glDrawArraysInstancedBaseInstance");
-	glad_glBindImageTexture = (PFNGLBINDIMAGETEXTUREPROC)load("glBindImageTexture");
-	glad_glMemoryBarrier = (PFNGLMEMORYBARRIERPROC)load("glMemoryBarrier");
 }
 static void load_GL_ARB_buffer_storage(GLADloadproc load) {
 	if(!GLAD_GL_ARB_buffer_storage) return;

@@ -25,11 +25,12 @@ static TempoEvent* g_tempo_cursor = NULL;
 #define MAX_SLEEP_US 2000
 static double spin_margin = DEFAULT_SPIN_US * 1e-6;
 
-static void wait_for_next_tick(int64_t clock)
+static void wait_for_next_tick(int64_t clock, int64_t due)
 {
-    if (tickscale > MAX_TPS_FOR_SPIN) 
+    if ((due / tickscale) > MAX_TPS_FOR_SPIN) 
         return;
-    double dt = ((double)(clock + 1) - tick) / tickscale;
+    double target = (double)(due > clock + 1 ? due : clock + 1);
+    double dt = (target - tick) / tickscale;
     double to_tempo = (g_tempo_cursor->tick - tick) / tickscale;
     if (to_tempo < dt) 
         dt = to_tempo;
@@ -233,7 +234,6 @@ void StartPlayback(int singlethread)
     while(!stopping)
     {
         int64_t clock = (int64_t)clock_getTick();
-        if (clock == current_clock) { wait_for_next_tick(clock); continue; }
         if (clock < current_clock)
         {
             while (timing > timingArr && timing->tick > clock)
@@ -244,6 +244,9 @@ void StartPlayback(int singlethread)
             if (!singlethread)
                 Sound_Flush();
         }
+        int64_t next = MIN(timing->tick, sysex->tick);
+        current_clock = clock;
+        if (clock < next) { wait_for_next_tick(clock, next); continue; }
         while (timing->tick <= clock)
         {
             int64_t count = (timing + 1)->event_offset;
@@ -263,7 +266,6 @@ void StartPlayback(int singlethread)
             SubmitSysEx(*sysex);
             sysex++;
         }
-        current_clock = clock;
     }
     if (!singlethread)
         audiothread_join();
