@@ -16,6 +16,8 @@
 "    int uTransparencyEnabled;\n" \
 "};\n"
 
+// the glow and the opacity are decided here, once per vertex of a note, so a single flat vec4 (rgb, final alpha) goes to the
+// fragment shader, which only writes it
 static const char* QuadVertSrc =
 "#version 420 core\n"
 "layout(location = 0) in int aStartTick;\n"
@@ -24,33 +26,25 @@ static const char* QuadVertSrc =
 FRAME_BLOCK
 "uniform sampler1D uPalette;\n"
 "flat out vec4 vColor;\n"
-"flat out int vIsActive;\n"
-"flat out float opacity;\n"
 "void main() {\n"
 "    int endTick = aEndTick > 0 ? aEndTick : uViewEnd;\n"
 "    bool isEnd = (uint(gl_VertexID) & 1u) != 0u;\n"
 "    bool isTop = ((uint(gl_VertexID) >> 1) & 1u) != 0u;\n"
 "    float x = float((bool(isEnd)? endTick : aStartTick) - uViewStart) * uMetrics.x - 1.0;\n"
 "    float y = uMetrics.y + float(((aPackedData >> 8) & 0xFFu) + uint(isTop)) * uMetrics.z;\n"
-"    vColor = texelFetch(uPalette, int((aPackedData >> 16) & 0xFFu), 0);\n"
-"    vIsActive = (uCurrentTick >= aStartTick && uCurrentTick <= endTick) ? 1 : 0;\n"
-"    opacity = float(((aPackedData & 0xFFu) + 1u)) / 128.0;\n"
+"    vec3 color = texelFetch(uPalette, int((aPackedData >> 16) & 0xFFu), 0).rgb;\n"
+"    bool lit = uCurrentTick >= aStartTick && uCurrentTick <= endTick;\n"
+"    color = (uGlowEnabled == 1 && lit) ? min(color * 2.0 + 0.1, vec3(1.0)) : color;\n"
+"    float opacity = (uTransparencyEnabled == 1) ? float(((aPackedData & 0xFFu) + 1u)) / 128.0 : 1.0;\n"
+"    vColor = vec4(color, opacity);\n"
 "    gl_Position = vec4(x, y, 0, 1.0);\n"
 "}\n";
 
 static const char* QuadFragSrc =
 "#version 420 core\n"
 "flat in vec4 vColor;\n"
-"flat in int vIsActive;\n"
-"flat in float opacity;\n"
-FRAME_BLOCK
 "out vec4 fragColor;\n"
-"void main() {\n"
-"    float note_opacity = (uTransparencyEnabled == 1) ? opacity : 1.0;\n"
-"    vec3 color = vColor.rgb;\n"
-"    color = (uGlowEnabled == 1 && vIsActive == 1) ? min(color * 2.0 + 0.1, vec3(1.0)) : color;\n"
-"    fragColor = vec4(color, note_opacity);\n"
-"}\n";
+"void main() { fragColor = vColor; }\n";
 
 // rewrites the notes of one page of the buffer of the notes, for transform feedback: the notes come in as they are, the
 // EndTick is replaced when the table uOvr (one entry per note, in the order of the pages being rewritten) has one,
