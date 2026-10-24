@@ -1,14 +1,21 @@
 #ifndef TIMER_H
 #define TIMER_H
 #include <time.h>
+
 #if defined(_WIN32) || defined(_WIN64)
-#include <windows.h>
-#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
-#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
-#endif
+    #include <windows.h>
+    #ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+        #define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
+    #endif
+    #define DEFAULT_SPIN_US 600
+    #define DEFAULT_IDLE_US 500
 #else
-#include <sys/prctl.h>
+    #include <sys/prctl.h>
+    #define DEFAULT_SPIN_US 60
+    #define DEFAULT_IDLE_US 50
 #endif
+#define MAX_SLEEP_US 2000
+
 static inline double get_time(void)
 {
     struct timespec ts;

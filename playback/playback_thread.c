@@ -4,7 +4,6 @@
 #include "timer.h"
 #include "../synth/sound.h"
 #include "../third_party/conmidi_digit_formatter.h"
-#include <math.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -20,18 +19,30 @@ int64_t current_clock = 0;
 static atomic_int playback_running = 0;
 _Atomic double playback_next_due = 0.0;
 static _Atomic int64_t pending_skip = 0;
-static double spin_margin = DEFAULT_SPIN_US * 1e-6;
+double spin_margin = DEFAULT_SPIN_US * 1e-6;
 static TempoEvent* g_tempo_cursor = NULL;
 
-static void wait_for_next_tick(int64_t clock, int64_t due)
+static void wait_for_next_tick(int64_t due)
 {
-    if (((due - clock) / tickscale) < spin_margin) 
+    double time_to_due = (double)(due - tick) / tickscale;
+    if (time_to_due < spin_margin)
+    {
+        static int64_t published = -1; // the moment the next group is due, handed to the audio thread once per group, not once per spin
+        if (due != published)
+        {
+            atomic_store_explicit(&playback_next_due, last + time_to_due, memory_order_relaxed);
+            published = due;
+        }
         return;
-    double target = (double)(due > clock + 1 ? due : clock + 1);
-    double dt = (target - tick) / tickscale;
-    double to_tempo = (g_tempo_cursor->tick - tick) / tickscale;
-    if (to_tempo < dt) 
-        dt = to_tempo;
+    }
+
+    double dt = time_to_due;
+    if (g_tempo_cursor->tick > tick)
+    {
+        double to_tempo = (g_tempo_cursor->tick - tick) / tickscale;
+        if (to_tempo < dt)
+            dt = to_tempo;
+    }
     if (dt > MAX_SLEEP_US * 1e-6) 
         dt = MAX_SLEEP_US * 1e-6;
     atomic_store_explicit(&playback_next_due, last + dt, memory_order_relaxed);
@@ -241,9 +252,6 @@ void StartPlayback(int singlethread)
             if (!singlethread)
                 Sound_Flush();
         }
-        int64_t next = MIN(timing->tick, sysex->tick);
-        current_clock = clock;
-        if (clock < next) { wait_for_next_tick(clock, next); continue; }
         while (timing->tick <= clock)
         {
             int64_t count = (timing + 1)->event_offset;
@@ -263,6 +271,10 @@ void StartPlayback(int singlethread)
             SubmitSysEx(*sysex);
             sysex++;
         }
+        current_clock = clock;
+        int64_t next = MIN(timing->tick, sysex->tick);
+        if (clock < next)
+            wait_for_next_tick(next);
     }
     if (!singlethread)
         audiothread_join();

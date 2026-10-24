@@ -8,7 +8,7 @@ extern int64_t playednotes, notespersec;
 extern volatile int stopping;
 extern int64_t current_clock;
 extern _Atomic double playback_next_due; // when the playback thread will next look at the clock, for the audio thread to sync its polling to
-extern double tick, delta, tickscale, bpm;
+extern double tick, delta, tickscale, bpm, spin_margin;
 void clock_pause(void);
 void clock_skip(double ticks); // relative seek, applied by the playback thread
 void UpdatePlaybackStats(void);

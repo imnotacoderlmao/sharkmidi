@@ -2,7 +2,6 @@
 #include "sound.h"
 #include "../playback/playback_thread.h"
 #include "../playback/timer.h"
-#include "../misc/util.h"
 #include "../parse/midistorage.h"
 #include <string.h>
 #include <stdio.h>
@@ -139,7 +138,7 @@ static void* audiothread(void* args)
             continue;
         double now = get_time();
         double due = atomic_load_explicit(&playback_next_due, memory_order_relaxed);
-        if (due > now)
+        if ((due + spin_margin) > now)
         {
             double wake = due - DEFAULT_SPIN_US * 1e-6;
             if (wake > now)
