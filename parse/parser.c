@@ -1205,7 +1205,10 @@ static void merge_sift_down(MergeNode* heap, int64_t n, int64_t i)
 }
 
 // walks the groups of a track in order. a position (TTPos) can be kept and resumed
-typedef struct { int64_t j, tick, ei; } TTPos; // next group, tick of the group before it, next escape
+typedef struct
+{ 
+    int64_t j, tick, ei; 
+} TTPos; // next group, tick of the group before it, next escape
 typedef struct
 {
     const TrackTick* d;

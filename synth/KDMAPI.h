@@ -4,7 +4,8 @@
 #if defined(_WIN32) || defined(_WIN64)
     #include <windows.h>
     #if !defined(_MMEAPI_H_) && !defined(MIDIHDR)
-        typedef struct {
+        typedef struct 
+        {
             uint8_t* lpData;
             uint32_t dwBufferLength;
             uint32_t dwBytesRecorded;

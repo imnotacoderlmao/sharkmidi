@@ -25,7 +25,7 @@ static TempoEvent* g_tempo_cursor = NULL;
 
 static void wait_for_next_tick(int64_t clock, int64_t due)
 {
-    if ((due / tickscale) < spin_margin) 
+    if (((due - clock) / tickscale) < spin_margin) 
         return;
     double target = (double)(due > clock + 1 ? due : clock + 1);
     double dt = (target - tick) / tickscale;
@@ -126,6 +126,8 @@ void clock_pause(void)
 TickGroup* timing = NULL;
 double midifps = 0;
 double smoothed_nps = 0.0, smoothed_midifps = 0.0;
+static RollingAvg nps_avg = {0};
+static RollingAvg mfps_avg = {0};
 
 static void update_playback_stats(void)
 {   
@@ -140,18 +142,15 @@ static void update_playback_stats(void)
 
     if (tick < tickscale && (timing + 1)->tick > (tickscale * 10))
         tick = (timing + 1)->tick - ppq;
-        
-    midifps = delta > 0.0 ? 1.0 / delta : 0.0;
+
     playednotes = timing->notecount;
 
     int64_t delta_notes = playednotes - playednotes2;
     double instant_nps = (double)delta_notes / dt;
     playednotes2 = playednotes;
 
-    double alpha = 1.0 - exp(-dt * 2.0);
-    smoothed_nps += alpha * (instant_nps - smoothed_nps);
-    smoothed_midifps += alpha * (midifps - smoothed_midifps);
-    notespersec = (int64_t)smoothed_nps;
+    notespersec = (int64_t)rolling_avg_update(&nps_avg, instant_nps);
+    smoothed_midifps = rolling_avg_update(&mfps_avg, 1.0 / delta);
 
     printf("tick: %s / %s | notes: %s / %s (%s/s) | bpm: %.2lf | midi thread: %10s fps",
         AddCommas(current_clock), AddCommas(maxTick), AddCommas(playednotes), AddCommas(totalnotes),

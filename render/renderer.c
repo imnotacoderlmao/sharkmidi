@@ -16,7 +16,8 @@ typedef struct
     uint32_t PackedData; // colorIdx:8 << 16 | key:8 << 8 | velocity:8
 } RenderNote;
 
-typedef struct {
+typedef struct 
+{
     float uMetrics[3];
     int32_t uGlowEnabled;
     int32_t uViewStart;
@@ -26,7 +27,8 @@ typedef struct {
     int32_t pad[4];      // the std140 block is 48 bytes
 } FrameUniforms;
 
-typedef struct { 
+typedef struct 
+{ 
     uint32_t slot;   // while count > 0: the number of this note in the pages (low 32 bits, see close_note)
     int32_t count; 
 } KeyHeader;
@@ -56,7 +58,10 @@ static GLuint vao, cursorVAO, vboBuffer, paletteTex, scatterShader, scatterVao, 
 static RenderNote* batch;             // BATCH_NOTES of them, allocated at run time (a static array of this size is stored in the exe on mingw)
 // new notes on their way to video memory, the last batchN notes before noteHead
 static int batchN;
-typedef struct { int32_t phys; int32_t open; int32_t maxEnd; } PageInfo; // phys -1: freed
+typedef struct
+{ 
+    int32_t phys, open, maxEnd;
+} PageInfo; // phys -1: freed
 static PageInfo* pages;               // pages[i] is the page numbered pageOrigin + i, entries before pageLo are freed
 static int64_t pageOrigin, pageLo, pageHi, pageCap, livePages;
 static int64_t noteHead;              // number of the next note, a note's page is its number >> PAGE_SHIFT
@@ -66,7 +71,10 @@ static int deferredRingCap = -1;
 static int* freeQ;                    // MAX_POOL_PAGES entries, allocated at run time
 static int freeHead, freeCount;       // free physical pages, oldest first
 static inline void freeq_push(int phys) { freeQ[(freeHead + freeCount++) & (MAX_POOL_PAGES - 1)] = phys; }
-typedef struct { uint32_t note, end; } Patch; // note: the place of the note in the buffer (physical page * PAGE_NOTES + its slot)
+typedef struct
+{ 
+    uint32_t note, end; 
+} Patch; // note: the place of the note in the buffer (physical page * PAGE_NOTES + its slot)
 static Patch* patches;
 static int64_t patchN, patchCap;
 #define SCATTER_PAGES 64              // pages one scatter pass rewrites
@@ -82,7 +90,11 @@ static int paletteUploadPending = 0;
 // or channels never share a header. a block is made when its (track, channel) first plays, from chunks of KB_CHUNK
 // blocks, and kbTab, indexed by track << 4 | channel, finds it. only the track table and the used blocks cost memory
 #define KB_CHUNK 1024
-typedef struct { void* base; KeyHeader* blocks; } KbChunk;
+typedef struct
+{ 
+    void* base; 
+    KeyHeader* blocks; 
+} KbChunk;
 static KeyHeader** kbTab;
 static int64_t kbTracks;     // tracks kbTab has room for
 #define MAX_RANK 4095         // tracks above this share the last rank when notes start on the same tick
@@ -93,8 +105,20 @@ static int kbUsed;           // blocks used in the last chunk
 
 // notes that are already sounding where a full sweep starts (see restore_sounding). tick is the start of the note,
 // pos orders notes of one tick back into file order, unmatched is how many note ons of the key are still open
-typedef struct { int64_t tick; int64_t pos; uint32_t track; uint32_t unmatched; uint8_t st, key, vel; } Sounding;
-typedef struct { int64_t tick; uint32_t track; uint8_t st, key, third; } RevEvent;
+typedef struct 
+{ 
+    int64_t tick; 
+    int64_t pos; 
+    uint32_t track; 
+    uint32_t unmatched; 
+    uint8_t st, key, vel; 
+} Sounding;
+typedef struct 
+{ 
+    int64_t tick; 
+    uint32_t track; 
+    uint8_t st, key, third; 
+} RevEvent;
 static Sounding* snd;
 static RevEvent* rev;
 static int64_t sndN, sndCap, revCap;

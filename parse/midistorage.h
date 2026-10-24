@@ -18,7 +18,7 @@ typedef struct
 
 // walks the runs in [p, end) of eventArr: RUN is executed once per run, before its events, with the run's status and
 // third byte in st and third, BODY once per event with its note in key (the event is st, key, third, as a midi message)
-#define EV_RUNS(p, end, st, third, key, RUN, BODY)                          \
+#define EV_RUNS(p, end, st, third, key, RUN, BODY)                             \
     do {                                                                       \
         const uint8_t* ev_p_ = (p);                                            \
         const uint8_t* ev_end_ = (end);                                        \
@@ -41,7 +41,8 @@ typedef struct
 // bytes, its size in bytes (runs) and the track it belongs to (tracks). its start offset is not stored, it is the
 // sum of the sizes before it, so one anchor (the start offset of every TG_ANCHOR-th run) is kept for random access
 #define TG_ANCHOR 64
-typedef struct {
+typedef struct 
+{
     uint32_t* runs;
     uint16_t* tracks;
     int64_t* anchors;   // anchors[i] = start offset of run i * TG_ANCHOR

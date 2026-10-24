@@ -295,6 +295,7 @@ int Window_Init(void)
     return 1;
 }
 
+static RollingAvg fps_avg = {0};
 void Window_Run(const char* filepath)
 {
     Renderer_Init();
@@ -306,7 +307,6 @@ void Window_Run(const char* filepath)
         spawn_playback_thread(singlethread);
     }
 
-    double smoothed_fps = 0.0;
     glfwSetDropCallback(win, drop_callback);
     glfwSetFramebufferSizeCallback(win, fb_resize_callback); 
     glfwSwapInterval(vsync);
@@ -316,9 +316,7 @@ void Window_Run(const char* filepath)
     {
         delta_time = get_time() - last_time;
         last_time += delta_time;
-        fps = delta_time > 0.0 ? (int)(1.0 / delta_time) : 0;
-        double alpha = 1.0 - exp(-delta_time * 2.0);
-        smoothed_fps += alpha * (fps - smoothed_fps);
+        fps = rolling_avg_update(&fps_avg, (1.0 / delta_time));
 
         glClear(GL_COLOR_BUFFER_BIT);
 
@@ -335,7 +333,7 @@ void Window_Run(const char* filepath)
         {
             Text_Queue(5, 4, 1.75f, 0.0f, 1.0f, 0.0f,
                 "tick: %s | zoom: %d %s | QoS: %s | bpm: %.2f | fps: %s",
-                AddCommas(current_clock), stationarynotes? (int)scrollfactor : WindowTicks, stationarynotes? "bars" : "ticks", AddCommas(NotesDrawnLastFrame), bpm, AddCommas(smoothed_fps));
+                AddCommas(current_clock), stationarynotes? (int)scrollfactor : WindowTicks, stationarynotes? "bars" : "ticks", AddCommas(NotesDrawnLastFrame), bpm, AddCommas(fps));
             Text_Queue(5, fbHeight - 16, 1.75f, 0.0f, 0.7f, 1.0f,
                 "%s | notes: %s / %s (%s/s)", scrollfilenameifover32characters(filename), AddCommas(playednotes), AddCommas(totalnotes), AddCommas(notespersec));
             Text_Flush();
