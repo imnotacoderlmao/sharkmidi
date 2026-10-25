@@ -8,7 +8,7 @@
 #include <stdlib.h>
 #include <pthread.h>
 
-int issynthinitiated = 0, singlethread = 0, voicefetching = 0;
+int issynthinitiated = 0, singlethread = 1, voicefetching = 0;
 static pthread_t audio_thread;
 
 // the events go from the playback thread to the audio thread as packets in a byte ring: a 4 byte length, then that many
@@ -156,13 +156,23 @@ static void* audiothread(void* args)
     return NULL;
 }
 
-void audiothread_entry(void)
+int audiothread_entry(void)
 {
+    // the ring is made here and not in Sound_Init: the thread mode can be toggled after the synth was initialised
+    if (!ring)
+        ring = malloc(RINGBUFFER_SIZE);
+    if (!packet)
+        packet = malloc(RINGBUFFER_SIZE);
+    if (!ring || !packet)
+    {
+        puts("out of memory for the audio ring, playing single threaded");
+        return 0;
+    }
     atomic_store(&ring_w, 0);
     atomic_store(&ring_r, 0);
     atomic_store(&ring_flush, 0);
     flushed = 0;
-    pthread_create(&audio_thread, NULL, audiothread, NULL);
+    return pthread_create(&audio_thread, NULL, audiothread, NULL) == 0;
 }
 
 // must run before AllNotesOFF, otherwise the audio thread can still push events after it
@@ -179,13 +189,7 @@ int Sound_Init(int singlethreaded)
         return 0;
     }
     KDMAPI_InitializeKDMAPIStream();
-    printf("singlethread is %s.\n", singlethreaded ? "TRUE" : "FALSE");
     singlethread = singlethreaded;
-    if (!singlethreaded && !ring)
-    {
-        ring = malloc(RINGBUFFER_SIZE);
-        packet = malloc(RINGBUFFER_SIZE);
-    }
     voicefetching = hasvoice;
     issynthinitiated = 1;
     return 1;

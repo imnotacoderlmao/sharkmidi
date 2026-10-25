@@ -12,9 +12,13 @@
 typedef struct
 {
     int64_t tick;
-    int64_t notecount;
     int64_t event_offset; // in bytes
 } TickGroup;
+
+// the notes before a tick group are not stored per group (that was 8 of the 24 bytes of every group), only before
+// every NOTE_ANCHOR_STRIDE-th one. Notes_Before counts the rest from eventArr, at most STRIDE - 1 groups of it
+#define NOTE_ANCHOR_SHIFT 6
+#define NOTE_ANCHOR_STRIDE (1 << NOTE_ANCHOR_SHIFT)
 
 // walks the runs in [p, end) of eventArr: RUN is executed once per run, before its events, with the run's status and
 // third byte in st and third, BODY once per event with its note in key (the event is st, key, third, as a midi message)
@@ -94,6 +98,7 @@ typedef struct
 
 
 extern TickGroup* timingArr;
+extern uint64_t* noteAnchor; // noteAnchor[k]: note ons before tick group k * NOTE_ANCHOR_STRIDE
 extern uint8_t* eventArr;
 extern TrackGroupArr trackGroups;
 extern SysExEvent* sysexArr;
@@ -107,6 +112,8 @@ extern uint32_t ppq;
 extern int64_t maxTick, activetickcount;
 extern const char* filename;
 extern int filename_len;
+// note ons in the tick groups before idx (the whole file for idx >= activetickcount)
+int64_t Notes_Before(int64_t idx);
 int64_t TimeSig_MeasureAt(int64_t tick);
 int64_t TimeSig_MeasureStart(int64_t measure);
 #endif

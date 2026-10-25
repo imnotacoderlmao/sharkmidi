@@ -1326,11 +1326,14 @@ static inline void merge_emit(MergeState* m, int64_t tick, uint32_t count, uint3
         m->curtick = tick;
         m->out++;
         if (fill)
-            timingArr[m->out] = (TickGroup){.tick = m->curtick, .notecount = m->notes, .event_offset = m->offset};
+        {
+            timingArr[m->out] = (TickGroup){.tick = m->curtick, .event_offset = m->offset};
+            if ((m->out & (NOTE_ANCHOR_STRIDE - 1)) == 0)
+                noteAnchor[m->out >> NOTE_ANCHOR_SHIFT] = (uint64_t)m->notes;
+        }
     }
     if (fill)
     {
-        timingArr[m->out].notecount += notes;
         if (trackGroups.runs)
             tg_put(m->entry, m->offset, count, track);
         slot->offset = m->offset; // the track parser reads its write position from here
@@ -1494,7 +1497,7 @@ static int merge_by_rank(TrackTick_arr* hist, int32_t tracks, const uint64_t* bi
     tickbound[0] = 0;
     tickbound[chunks] = maxTick + 1;
     for (int c = 1; c < chunks; c++)
-        tickbound[c] = tick_of_rank(bits, wprefix, words, distinct * c / chunks);
+        tickbound[c] = tick_of_rank(bits, wprefix, words, (distinct * c / chunks) & ~(int64_t)(NOTE_ANCHOR_STRIDE - 1)); // on an anchor, so a range owns whole anchor segments
 
     // where every track's groups cross those tick bounds
     #ifdef _OPENMP
@@ -1542,22 +1545,26 @@ static int merge_by_rank(TrackTick_arr* hist, int32_t tracks, const uint64_t* bi
                 int64_t r = tick_rank(bits, wprefix, it.tick);
                 timingArr[r].tick = it.tick;
                 timingArr[r].event_offset += it.count; // totals for now, turned into start offsets below
-                timingArr[r].notecount += it.notes;
+                noteAnchor[r >> NOTE_ANCHOR_SHIFT] += it.notes; // notes of the segment for now, turned into notes before it below
                 if (ecur) ecur[r]++;
             }
         }
 
     TR_LAP(rank_pass1, trm);
 
-    // prefix sums: start offset of each tick in eventArr, notes up to and including it, first group index on it
+    // prefix sums: start offset of each tick in eventArr, notes before each anchor, first group index on each tick
     int64_t events = 0, notes = 0;
     uint32_t groups = 0;
+    for (int64_t k = 0; k <= (distinct - 1) >> NOTE_ANCHOR_SHIFT; k++)
+    {
+        int64_t segnotes = (int64_t)noteAnchor[k];
+        noteAnchor[k] = (uint64_t)notes;
+        notes += segnotes;
+    }
     for (int64_t r = 0; r < distinct; r++)
     {
         int64_t tickevents = timingArr[r].event_offset;
-        notes += timingArr[r].notecount;
         timingArr[r].event_offset = events;
-        timingArr[r].notecount = notes;
         events += tickevents;
         if (ecur)
         {
@@ -1751,6 +1758,7 @@ int LoadMIDI(const char* filepath)
     updatestatsandprint("merging per track timing into main timing array and track RLE\n");
     double trmark = g_trace ? get_time() : 0.0;
     timingArr = calloc(activetickcount + 1, sizeof(TickGroup));
+    noteAnchor = calloc((size_t)(activetickcount >> NOTE_ANCHOR_SHIFT) + 1, sizeof(uint64_t));
     if (trackcolors)
     {
         trackGroups.runs = malloc((size_t)total_entries * sizeof(uint32_t));
@@ -1822,7 +1830,7 @@ int LoadMIDI(const char* filepath)
     free(wide);
     munmap(filePtr, fileLen);
     updatestatsandprint("\nfinalizing events and sorting metadata\n");
-    timingArr[activetickcount] = (TickGroup){INT64_MAX, (int64_t)totalnotes, (int64_t)bytecount};
+    timingArr[activetickcount] = (TickGroup){INT64_MAX, (int64_t)bytecount};
     TempoEvent tev = {INT64_MAX, 500000};
     TempoEvent_arr_push(&tempos, tev);
     SysExEvent sex = {.tick = INT64_MAX};
@@ -1873,6 +1881,7 @@ void UnloadMIDI(void)
     SysExEvent_arr_free(&sysexs);
     free(eventArr);
     free(timingArr);
+    free(noteAnchor);
     // trackcolors can be toggled between load and unload, so key off the pointer
     free(trackGroups.runs);
     free(trackGroups.tracks);
@@ -1887,5 +1896,6 @@ void UnloadMIDI(void)
     timesigCount = 0;
     eventArr = NULL;
     timingArr = NULL;
+    noteAnchor = NULL;
     puts("successfully freed midi");
 }

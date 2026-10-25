@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <stdlib.h>
 #include <stdint.h>
 #include "KDMAPI.h"
 
@@ -17,7 +18,7 @@ int hasvoice = 0;
 #define REQUIRE_SYM(var, type, name)                                      \
     if (((var) = (type)GET_FUNC(KDMAPI_libHandle, name)) == NULL)         \
     {                                                                     \
-        puts("[KDMAPI] GetProcAddress failed for " name ".");             \
+        puts("[KDMAPI] GetProcAddress failed for " name ". exiting");     \
         goto fail;                                                        \
     }
 
@@ -57,6 +58,6 @@ int KDMAPI_Setup(void)
 fail:
     FREE_LIB(KDMAPI_libHandle);
     KDMAPI_libHandle = NULL;
-    return 0;
+    exit(0);
 }
 #undef REQUIRE_SYM

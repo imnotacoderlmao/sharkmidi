@@ -9,10 +9,10 @@
 #include "../third_party/conmidi_digit_formatter.h"
 #include "text_renderer.h"
 #include <GLFW/glfw3.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <math.h>
 
 int dynascroll = 0, uivisible = 1, PAD = 20;;
 double scrollfactor = 1.0;
@@ -94,8 +94,8 @@ static void glfw_error_callback(int code, const char* desc)
     fprintf(stderr, "GLFW error %d: %s\n", code, desc);
 }
 
-double delta_time = 0.0, last_time = 0.0;
-int fps = 0, vsync = 1;
+double delta_time = 0.0, last_time = 0.0, fps = 0.0;
+int vsync = 1;
 
 static void key_callback(GLFWwindow* w, int key, int scancode, int action, int mods)
 {
@@ -119,8 +119,6 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
             Renderer_ResetForUnload();
             UnloadMIDI();
         }
-        if (key == GLFW_KEY_G)
-            EnableGlow = !EnableGlow;
         if (key == GLFW_KEY_H)
         {
             uivisible = !uivisible;
@@ -155,21 +153,25 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
                 scrollfactor = MAX((int)(WindowTicks / MAX(TimeSig_MeasureStart(m + 1) - TimeSig_MeasureStart(m), 1)), 1);
             }
         }
-
         if (key == GLFW_KEY_V)
         {
             vsync = !vsync;
             glfwSwapInterval(vsync);
         }
+        if (key == GLFW_KEY_B)
+        {
+            singlethread = !singlethread;
+            printf("singlethread is now %s.\n", singlethread ? "TRUE" : "FALSE");
+        }
         if (key == GLFW_KEY_Q)
             reinitsynths();   
         if (key == GLFW_KEY_R)
             stopping = 1;
+        if (key == GLFW_KEY_G)
+            EnableGlow = !EnableGlow;
     }
     if (action != GLFW_RELEASE)
     {
-
-        
         if (key == GLFW_KEY_RIGHT)
             clock_skip(tickscale);
 
@@ -295,7 +297,6 @@ int Window_Init(void)
     return 1;
 }
 
-static RollingAvg fps_avg = {0};
 void Window_Run(const char* filepath)
 {
     Renderer_Init();
@@ -310,13 +311,16 @@ void Window_Run(const char* filepath)
     glfwSetDropCallback(win, drop_callback);
     glfwSetFramebufferSizeCallback(win, fb_resize_callback); 
     glfwSwapInterval(vsync);
+    double smoothed_fps = 0.0;
     last_time = get_time();
     
     while (!glfwWindowShouldClose(win))
     {
         delta_time = get_time() - last_time;
         last_time += delta_time;
-        fps = rolling_avg_update(&fps_avg, (1.0 / delta_time));
+        fps = (1.0 / delta_time);
+        double alpha = 1.0 - exp(-delta_time * 2.0);
+        smoothed_fps += alpha * (fps - smoothed_fps);
 
         glClear(GL_COLOR_BUFFER_BIT);
 
@@ -326,14 +330,12 @@ void Window_Run(const char* filepath)
 
         if (dynascroll)
             WindowTicks = (int)(tickscale * scrollfactor);
-        
-        UpdatePlaybackStats();
 
         if (uivisible)
         {
             Text_Queue(5, 4, 1.75f, 0.0f, 1.0f, 0.0f,
                 "tick: %s | zoom: %d %s | QoS: %s | bpm: %.2f | fps: %s",
-                AddCommas(current_clock), stationarynotes? (int)scrollfactor : WindowTicks, stationarynotes? "bars" : "ticks", AddCommas(NotesDrawnLastFrame), bpm, AddCommas(fps));
+                AddCommas(current_clock), stationarynotes? (int)scrollfactor : WindowTicks, stationarynotes? "bars" : "ticks", AddCommas(NotesDrawnLastFrame), bpm, AddCommas(smoothed_fps));
             Text_Queue(5, fbHeight - 16, 1.75f, 0.0f, 0.7f, 1.0f,
                 "%s | notes: %s / %s (%s/s)", scrollfilenameifover32characters(filename), AddCommas(playednotes), AddCommas(totalnotes), AddCommas(notespersec));
             Text_Flush();

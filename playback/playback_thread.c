@@ -1,10 +1,10 @@
 #include "../parse/midistorage.h"
 #include "../parse/parser.h"
 #include "../misc/util.h"
-#define TIMER_IMPL // the shared tsc calibration lives here (-DUSE_TSC_CLOCK)
 #include "timer.h"
 #include "../synth/sound.h"
 #include "../third_party/conmidi_digit_formatter.h"
+#include <math.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -142,11 +142,7 @@ void clock_pause(void)
 }
 
 TickGroup* timing = NULL;
-double midifps = 0;
-double smoothed_nps = 0.0, smoothed_midifps = 0.0;
-static RollingAvg nps_avg = {0};
-static RollingAvg mfps_avg = {0};
-
+double smoothed_midifps = 0.0;
 static void update_playback_stats(void)
 {   
     double noww = get_time();
@@ -161,14 +157,14 @@ static void update_playback_stats(void)
     if (tick < tickscale && (timing + 1)->tick > (tickscale * 10))
         tick = (timing + 1)->tick - ppq;
 
-    playednotes = timing->notecount;
+    playednotes = Notes_Before(timing - timingArr); // the groups before the next one to play
 
     int64_t delta_notes = playednotes - playednotes2;
-    double instant_nps = (double)delta_notes / dt;
     playednotes2 = playednotes;
 
-    notespersec = (int64_t)rolling_avg_update(&nps_avg, instant_nps);
-    smoothed_midifps = rolling_avg_update(&mfps_avg, 1.0 / delta);
+    double alpha = 1.0 - exp(-dt * 2.0);
+    notespersec += alpha * ((double)(delta_notes / dt) - notespersec);
+    smoothed_midifps += alpha * ((1/delta) - smoothed_midifps);
 
     printf("tick: %s / %s | notes: %s / %s (%s/s) | bpm: %.2lf | midi thread: %10s fps",
         AddCommas(current_clock), AddCommas(maxTick), AddCommas(playednotes), AddCommas(totalnotes),
@@ -244,8 +240,8 @@ void StartPlayback(int singlethread)
     if (getenv("SHARKMIDI_SPIN_US"))
         spin_margin = atof(getenv("SHARKMIDI_SPIN_US")) * 1e-6;
     stopping = 0;
-    if (!singlethread)
-        audiothread_entry();
+    if (!singlethread && !audiothread_entry())
+        singlethread = 1; // no audio thread, the events are sent from here
     while(!stopping)
     {
         int64_t clock = (int64_t)clock_getTick();
@@ -289,7 +285,7 @@ void StartPlayback(int singlethread)
     AllNotesOFF();
     uint8_t rolandreset[] = {0xF0, 0x41, 0x10, 0x42, 0x12, 0x40, 0x00, 0x7F, 0x00, 0x41, 0xF7};
     SubmitSysEx((SysExEvent){0, 11, rolandreset});    
-    notespersec = 0, smoothed_nps = 0, playednotes = 0, playednotes2 = 0;
+    notespersec = 0, notespersec = 0, playednotes = 0, playednotes2 = 0;
     puts("\nPlayback finished...");
     atomic_store(&playback_running, 0);
 }

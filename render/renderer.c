@@ -992,7 +992,16 @@ void Renderer_Render(int32_t tick, int pad)
     int sweepEnd = viewEnd + lookaheadTicks;
     // the pages that ended left of the previous view are gone, so a view that moved back needs a new sweep,
     // even when its right end did not move (it stops at the end of the song)
-    int incremental = lastSweepEnd >= 0 && sweepEnd >= lastSweepEnd && (sweepEnd - lastSweepEnd) < WindowTicks && viewStart >= lastViewStart;
+    int incremental = lastSweepEnd >= 0 && sweepEnd >= lastSweepEnd && viewStart >= lastViewStart;
+    if (incremental && (sweepEnd - lastSweepEnd) >= WindowTicks)
+    {
+        // the view moved by more than its width (a high tick rate, or a long frame). what was skipped is still swept, so
+        // the notes sounding at the new view are there without reading anything back: a fresh sweep with restore_sounding
+        // has to read back as much, and the whole budget of it every frame. beyond that many bytes of events a fresh
+        // sweep is the cheaper one (a seek)
+        int64_t skipped = timingArr[find_active_tick_idx((int64_t)sweepEnd + 1)].event_offset - timingArr[find_active_tick_idx((int64_t)lastSweepEnd + 1)].event_offset;
+        incremental = skipped <= RENDER_BACK_BYTES;
+    }
 
     if (!incremental)
     {

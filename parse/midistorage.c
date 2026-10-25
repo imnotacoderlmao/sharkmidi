@@ -1,6 +1,7 @@
 #include "midistorage.h"
 #include <stddef.h>
 TickGroup* timingArr = NULL;
+uint64_t* noteAnchor = NULL;
 uint8_t* eventArr = NULL;
 TrackGroupArr trackGroups = {0};
 SysExEvent* sysexArr = NULL;
@@ -44,4 +45,14 @@ int64_t TimeSig_MeasureStart(int64_t measure)
         return measure * (ppq * 4);
     const TimeSigEvent* e = &timesigArr[ts_find(measure, 1)];
     return e->tick + (measure - e->measure) * e->measure_ticks;
+}
+
+int64_t Notes_Before(int64_t idx)
+{
+    if (idx >= activetickcount) return (int64_t)totalnotes;
+    int64_t notes = (int64_t)noteAnchor[idx >> NOTE_ANCHOR_SHIFT];
+    const uint8_t* p = eventArr + timingArr[idx & ~(int64_t)(NOTE_ANCHOR_STRIDE - 1)].event_offset;
+    const uint8_t* end = eventArr + timingArr[idx].event_offset;
+    EV_RUNS(p, end, st, third, key, , { notes += (st & 0xF0) == 0x90; (void)third; (void)key; });
+    return notes;
 }
