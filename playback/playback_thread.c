@@ -4,7 +4,6 @@
 #include "timer.h"
 #include "../synth/sound.h"
 #include "../third_party/conmidi_digit_formatter.h"
-#include <math.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -143,7 +142,7 @@ void clock_pause(void)
 
 TickGroup* timing = NULL;
 static RollingAvg mnps_avg = {0};
-static void update_playback_stats(void)
+void UpdatePlaybackStats(void)
 {   
     if (stopping)
         return;
@@ -160,15 +159,6 @@ static void update_playback_stats(void)
     if (voicefetching)
         printf(" | %s voices", AddCommas(KDMAPI_GetVoiceCount()));
     fputs("    \r", stdout);
-}
-
-static atomic_flag stats_busy = ATOMIC_FLAG_INIT;
-void UpdatePlaybackStats(void)
-{
-    if (atomic_flag_test_and_set_explicit(&stats_busy, memory_order_acquire))
-        return;
-    update_playback_stats();
-    atomic_flag_clear_explicit(&stats_busy, memory_order_release);
 }
 
 void SubmitSysEx(SysExEvent sysex)

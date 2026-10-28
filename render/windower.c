@@ -9,7 +9,6 @@
 #include "../third_party/conmidi_digit_formatter.h"
 #include "text_renderer.h"
 #include <GLFW/glfw3.h>
-#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
