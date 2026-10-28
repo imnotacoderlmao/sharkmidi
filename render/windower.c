@@ -311,16 +311,14 @@ void Window_Run(const char* filepath)
     glfwSetDropCallback(win, drop_callback);
     glfwSetFramebufferSizeCallback(win, fb_resize_callback); 
     glfwSwapInterval(vsync);
-    double smoothed_fps = 0.0;
+    RollingAvg fpsavg = {0};
+    double smoothed_fps = 0.0, nextstatsupdate = 0.0;
     last_time = get_time();
     
     while (!glfwWindowShouldClose(win))
     {
         delta_time = get_time() - last_time;
         last_time += delta_time;
-        fps = (1.0 / delta_time);
-        double alpha = 1.0 - exp(-delta_time * 2.0);
-        smoothed_fps += alpha * (fps - smoothed_fps);
 
         glClear(GL_COLOR_BUFFER_BIT);
 
@@ -331,6 +329,16 @@ void Window_Run(const char* filepath)
         if (dynascroll)
             WindowTicks = (int)(tickscale * scrollfactor);
 
+        if (current_clock > maxTick)
+            stopping = 1; 
+
+        if (last_time >= nextstatsupdate)
+        {
+            UpdatePlaybackStats();
+            smoothed_fps = rolling_avg_update(&fpsavg, 1.0 / delta_time);
+            nextstatsupdate = last_time + (1.0/60.0);
+        }
+
         if (uivisible)
         {
             Text_Queue(5, 4, 1.75f, 0.0f, 1.0f, 0.0f,
@@ -340,7 +348,6 @@ void Window_Run(const char* filepath)
                 "%s | notes: %s / %s (%s/s)", scrollfilenameifover32characters(filename), AddCommas(playednotes), AddCommas(totalnotes), AddCommas(notespersec));
             Text_Flush();
         }
-
         glfwSwapBuffers(win);
         glfwPollEvents();
     }

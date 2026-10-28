@@ -6,9 +6,9 @@
 int main(int argc, char* argv[])
 {
     char welcome[] = 
-    "========== sharkmidi commit #37 ==========\n"
+    "========== sharkmidi commit #38 ==========\n"
 #ifdef USE_TSC_CLOCK
-    "you are using a build of sharkmidi that uses __rtdsc() for time fetches. playback might drift a little.\n"
+    "you are using a build of sharkmidi that uses __rdtsc() for time fetches. playback might drift a little.\n"
 #endif
     "optionally, you could add a file path after the executable for the it to load a midi immediately, like:\n"
     "   ./sharkmidi (single threaded playback) (midi file directory)\n"

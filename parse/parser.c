@@ -247,8 +247,14 @@ static int64_t __attribute__((noinline)) varlen_decode_slow(int64_t* len, uint8_
     val = (val << 7) | (b & 0x7F);
     if (!(b & 0x80)) return (*len = val);
 
-    b = *(*trackPtr)++;
-    val = (val << 7) | (b & 0x7F);
+    b = *(*trackPtr)++;     
+    val = (val << 7) | (b & 0x7F);      
+    if (UNLIKELY((b & 0x80)))
+    {
+        b = *(*trackPtr)++;
+        val = (val << 7) | (b & 0x7F);
+        printf("wtf is wrong with your varlen, its showing length being %s\n", AddCommas(val));
+    }
     return (*len = val);
 }
 

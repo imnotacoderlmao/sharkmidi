@@ -142,37 +142,24 @@ void clock_pause(void)
 }
 
 TickGroup* timing = NULL;
-double smoothed_midifps = 0.0;
+static RollingAvg mnps_avg = {0};
 static void update_playback_stats(void)
 {   
-    double noww = get_time();
-    double dt = noww - laststatsupdate;
-    
-    if (dt < onesixtyh || stopping)
+    if (stopping)
         return;
-        
-    if (tick >= maxTick) 
-        stopping = 1;
-
-    if (tick < tickscale && (timing + 1)->tick > (tickscale * 10))
-        tick = (timing + 1)->tick - ppq;
 
     playednotes = Notes_Before(timing - timingArr); // the groups before the next one to play
-
     int64_t delta_notes = playednotes - playednotes2;
     playednotes2 = playednotes;
 
-    double alpha = 1.0 - exp(-dt * 2.0);
-    notespersec += alpha * ((double)(delta_notes / dt) - notespersec);
-    smoothed_midifps += alpha * ((1/delta) - smoothed_midifps);
+    notespersec = rolling_avg_update(&mnps_avg, delta_notes * 60);
 
     printf("tick: %s / %s | notes: %s / %s (%s/s) | bpm: %.2lf | midi thread: %10s fps",
         AddCommas(current_clock), AddCommas(maxTick), AddCommas(playednotes), AddCommas(totalnotes),
-        AddCommas(notespersec), bpm, AddCommas(smoothed_midifps));
+        AddCommas(notespersec), bpm, AddCommas(1 / delta));
     if (voicefetching)
         printf(" | %s voices", AddCommas(KDMAPI_GetVoiceCount()));
     fputs("    \r", stdout);
-    laststatsupdate = noww;
 }
 
 static atomic_flag stats_busy = ATOMIC_FLAG_INIT;
@@ -229,7 +216,7 @@ void StartPlayback(int singlethread)
     if (!issynthinitiated) { puts("no synth initiated!!!!!!!"); return; }
     if (atomic_exchange(&playback_running, 1))
         return;
-    playednotes = 0, playednotes2 = 0;
+    stopping = 0, playednotes = 0, playednotes2 = 0;
     const uint8_t* eventptr = eventArr;
     timing = timingArr;
     g_tempo_cursor = tempoArr;
@@ -239,9 +226,10 @@ void StartPlayback(int singlethread)
     os_timer_init();
     if (getenv("SHARKMIDI_SPIN_US"))
         spin_margin = atof(getenv("SHARKMIDI_SPIN_US")) * 1e-6;
-    stopping = 0;
     if (!singlethread && !audiothread_entry())
-        singlethread = 1; // no audio thread, the events are sent from here
+        singlethread = 1;
+    if ((timing + 1)->tick > (tickscale * 3))
+        tick = (timing + 1)->tick - ppq;
     while(!stopping)
     {
         int64_t clock = (int64_t)clock_getTick();
@@ -266,7 +254,6 @@ void StartPlayback(int singlethread)
 
             played = count;
             current_clock = timing->tick;
-            UpdatePlaybackStats();
             timing++;
         }
         while (sysex->tick <= clock)
