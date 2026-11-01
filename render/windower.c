@@ -9,7 +9,6 @@
 #include "../third_party/conmidi_digit_formatter.h"
 #include "text_renderer.h"
 #include <GLFW/glfw3.h>
-#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -164,7 +163,7 @@ static void key_callback(GLFWwindow* w, int key, int scancode, int action, int m
             printf("singlethread is now %s.\n", singlethread ? "TRUE" : "FALSE");
         }
         if (key == GLFW_KEY_Q)
-            reinitsynths();   
+            Sound_Init(singlethread);   
         if (key == GLFW_KEY_R)
             stopping = 1;
         if (key == GLFW_KEY_G)

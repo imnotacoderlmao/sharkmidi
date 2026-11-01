@@ -3,6 +3,7 @@
 #include "../playback/playback_thread.h"
 #include "../playback/timer.h"
 #include "../parse/midistorage.h"
+#include "KDMAPI.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -181,8 +182,17 @@ void audiothread_join(void)
     pthread_join(audio_thread, NULL);
 }
 
+static void terminate_stream(void)
+{
+    if (!issynthinitiated) return;
+    KDMAPI_TerminateKDMAPIStream();
+    issynthinitiated = 0;
+    voicefetching = 0;
+}
+
 int Sound_Init(int singlethreaded)
 {
+    terminate_stream();
     if (!KDMAPI_Setup())
     {
         printf("\nThis program requires OmniMIDI or a KDMAPI capable synth to have functioning audio!\n");
@@ -193,14 +203,6 @@ int Sound_Init(int singlethreaded)
     voicefetching = hasvoice;
     issynthinitiated = 1;
     return 1;
-}
-
-static void terminate_stream(void)
-{
-    if (!issynthinitiated) return;
-    KDMAPI_TerminateKDMAPIStream();
-    issynthinitiated = 0;
-    voicefetching = 0;
 }
 
 void Sound_Close(void)
@@ -215,11 +217,4 @@ void AllNotesOFF(void)
 {
     for (int channel = 0; channel < 16; channel++)
         KDMAPI_SendDirectData((uint32_t)(0xB0 | channel) | (0x7B << 8));
-}
-
-// keeps the ring alive. the audio thread may still be reading it while the synth restarts
-void reinitsynths(void)
-{
-    terminate_stream();
-    Sound_Init(singlethread);
 }

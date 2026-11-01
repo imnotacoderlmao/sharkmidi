@@ -28,7 +28,7 @@
     #include <cpuid.h>
     #include <stdatomic.h>
     #ifndef TSC_CAL_MS
-        #define TSC_CAL_MS 250 // the calibration error is about 100 ns / this, 1 ppm at 100 ms
+        #define TSC_CAL_MS 250 // the calibration error is about 100 ns / this, should be 0.4 ppm at 250 ms
     #endif
 #endif
 

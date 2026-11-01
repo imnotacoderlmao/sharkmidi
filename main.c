@@ -6,7 +6,7 @@
 int main(int argc, char* argv[])
 {
     char welcome[] = 
-    "========== sharkmidi commit #38 ==========\n"
+    "========== sharkmidi commit #39 ==========\n"
 #ifdef USE_TSC_CLOCK
     "you are using a build of sharkmidi that uses __rdtsc() for time fetches. playback might drift a little.\n"
 #endif
