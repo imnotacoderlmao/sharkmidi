@@ -334,15 +334,15 @@ void Window_Run(const char* filepath)
         if (last_time >= nextstatsupdate)
         {
             UpdatePlaybackStats();
-            smoothed_fps = rolling_avg_update(&fpsavg, 1.0 / delta_time);
-            nextstatsupdate = last_time + (1.0/60.0);
+            smoothed_fps = rolling_avg_update(&fpsavg, delta_time);
+            nextstatsupdate = last_time + onesixtyh;
         }
 
         if (uivisible)
         {
             Text_Queue(5, 4, 1.75f, 0.0f, 1.0f, 0.0f,
                 "tick: %s | zoom: %d %s | QoS: %s | bpm: %.2f | fps: %s",
-                AddCommas(current_clock), stationarynotes? (int)scrollfactor : WindowTicks, stationarynotes? "bars" : "ticks", AddCommas(NotesDrawnLastFrame), bpm, AddCommas(smoothed_fps));
+                AddCommas(current_clock), stationarynotes? (int)scrollfactor : WindowTicks, stationarynotes? "bars" : "ticks", AddCommas(NotesDrawnLastFrame), bpm, AddCommas(1.0 / smoothed_fps));
             Text_Queue(5, fbHeight - 16, 1.75f, 0.0f, 0.7f, 1.0f,
                 "%s | notes: %s / %s (%s/s)", scrollfilenameifover32characters(filename), AddCommas(playednotes), AddCommas(totalnotes), AddCommas(notespersec));
             Text_Flush();

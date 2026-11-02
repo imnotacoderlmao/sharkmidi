@@ -4,7 +4,6 @@
 #include "timer.h"
 #include "../synth/sound.h"
 #include "../third_party/conmidi_digit_formatter.h"
-#include <math.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -16,7 +15,6 @@ double now = 0.0, last = 0.0, delta = 0.0, tick = 0.0;
 double laststatsupdate = 0.0, bpm = 120.0, tickscale = 0.0;
 volatile int paused = 0, stopping = 1;
 int64_t current_clock = 0;
-#define onesixtyh 0.016666666
 static atomic_int playback_running = 0;
 _Atomic double playback_next_due = 0.0;
 static _Atomic int64_t pending_skip = 0;
@@ -228,8 +226,11 @@ void StartPlayback(int singlethread)
         spin_margin = atof(getenv("SHARKMIDI_SPIN_US")) * 1e-6;
     if (!singlethread && !audiothread_entry())
         singlethread = 1;
-    if ((timing + 1)->tick > (tickscale * 3))
+    if ((timing + 1)->tick > (tickscale * 5))
+    {
         tick = (timing + 1)->tick - ppq;
+        resync_tempo_cursor();
+    }
     while(!stopping)
     {
         int64_t clock = (int64_t)clock_getTick();

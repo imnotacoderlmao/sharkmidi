@@ -4,7 +4,7 @@
 #define MIN(a, b) (((a) < (b)) ? (a) : (b))
 #define MAX(a, b) (((a) > (b)) ? (a) : (b))
 #define UNLIKELY(x) __builtin_expect(!!(x), 0)
-
+#define onesixtyh 0.016666666
 #define ROLLING_SIZE 60
 typedef struct 
 {
@@ -30,6 +30,5 @@ static double rolling_avg_update(RollingAvg* ra, double new_val)
     ra->head = (ra->head + 1) % ROLLING_SIZE;
     return ra->sum / ra->count;
 }
-
 
 #endif
