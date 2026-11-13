@@ -608,19 +608,71 @@ void process_one_event(KeyHeader* k, uint32_t statusHigh, uint32_t key, uint32_t
 }
 
 // [currentOffset, runEnd) are whole runs of eventArr (see midistorage.h), offsets are in bytes, all of one track.
-// a run has one status, so its channel, and with it the key block, is looked up once per run. the colour only has
+// a run has one status, so its channel, and with it the key block, is looked up once per run, and the loop is chosen by
+// the status: note ons, note offs, and everything else is skipped. it does what process_one_event does (that one is
+// still used where the events do not come from a run), but bn and the note counter stay in registers inside the loop,
+// and the note off of a note that is still in the batch is finished here instead of in close_note. the colour only has
 // room for 16 tracks (the palette), so tracks past that repeat colours, but never share key headers
-static int64_t process_run_events(uint8_t* messages, uint32_t track, int64_t currentOffset, int64_t runEnd, int64_t tick, int* bn)
+static int64_t process_run_events(uint8_t* messages, uint32_t track, int64_t currentOffset, int64_t runEnd, int64_t tick, int* bnp)
 {
     if (UNLIKELY(track >= (uint64_t)kbTracks)) kb_grow(track);
-    EV_RUNS(messages + currentOffset, messages + runEnd, st, third, key,
+    const uint8_t* p = messages + currentOffset;
+    const uint8_t* end = messages + runEnd;
+    int bn = *bnp;
+    const int32_t endTick = tick ? (int32_t)tick : 1; // 0 means "still sounding"
+    while (p < end)
+    {
+        const uint32_t st = p[0], third = p[1];
+        p += 2;
         KeyHeader** slot = &kbTab[((int64_t)track << 4) | (st & 0x0F)];
         KeyHeader* kb = *slot;
         if (UNLIKELY(!kb)) kb = *slot = kb_alloc();
-        const uint32_t color = ((track & 15) << 4) | (st & 0x0F);
         const uint32_t statusHigh = st & 0xF0;
-        ,
-    { process_one_event(&kb[key], statusHigh, key, third, color, tick, bn); });
+        uint8_t b;
+        if (statusHigh == 0x90)
+        {
+            const uint32_t packed = ((((track & 15) << 4) | (st & 0x0F)) << 16) | third;
+            do {
+                b = *p++;
+                const uint32_t key = b & 0x7F;
+                KeyHeader* k = &kb[key];
+                if (k->count == 0)
+                {
+                    if (UNLIKELY((noteHead & PAGE_MASK) == 0)) { *bnp = bn; page_push(bnp); bn = *bnp; }
+                    pages[pageHi - 1].open++;
+                    k->slot = (uint32_t)noteHead++;
+                    batch[bn++] = (RenderNote){.StartTick = (int32_t)tick, .EndTick = 0, .PackedData = packed | (key << 8)};
+                    if (UNLIKELY(bn == BATCH_NOTES)) { *bnp = bn; batch_full(bnp); bn = *bnp; }
+                }
+                k->count++;
+            } while (!(b & 0x80));
+        }
+        else if (statusHigh == 0x80)
+        {
+            do {
+                b = *p++;
+                KeyHeader* k = &kb[b & 0x7F];
+                if (k->count > 0 && --k->count == 0)
+                {
+                    const int64_t n = noteHead - (int64_t)((uint32_t)noteHead - k->slot); // the notes sounding are fewer than 2^32
+                    const int64_t inBatch = n - (noteHead - bn);
+                    const int64_t i = (n >> PAGE_SHIFT) - pageOrigin;
+                    if (UNLIKELY(inBatch < 0 || i < pageLo || i >= pageHi || pages[i].phys < 0))
+                        close_note(k->slot, tick, bn); // in video memory already (or its page was dropped): a patch
+                    else
+                    {
+                        PageInfo* pg = &pages[i];
+                        pg->open--;
+                        if (endTick > pg->maxEnd) pg->maxEnd = endTick;
+                        batch[inBatch].EndTick = endTick;
+                    }
+                }
+            } while (!(b & 0x80));
+        }
+        else
+            do { b = *p++; } while (!(b & 0x80));
+    }
+    *bnp = bn;
     return runEnd;
 }
 
