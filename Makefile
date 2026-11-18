@@ -1,68 +1,82 @@
 CC ?= gcc
-CFLAGS = -O3 -fstrict-overflow -fno-math-errno -flto=auto -fno-stack-protector -fno-semantic-interposition -fno-plt -ffunction-sections -fdata-sections -fno-unwind-tables -fno-asynchronous-unwind-tables -fno-ident -Wl,-rpath,'$$ORIGIN' -s
-# libmath now linked due to exp()
-LDFLAGS = -pthread -lm -Wl,--gc-sections -Wl,--build-id=none -flto=auto
+BUILD_DIR := build
 
-# for cross compilation purposes
-IS_MINGW = $(shell $(CC) -dumpmachine 2>&1 | grep -E "mingw|w64")
-native = $(shell echo $(do_compile_native) | tr A-Z a-z)
-do_openmp = $(shell echo $(multiprocessing) | tr A-Z a-z)
-dbg = $(shell echo $(debug) | tr A-Z a-z)
-tsc = $(shell echo $(use_tsc) | tr A-Z a-z)
-is_headless = $(shell echo $(headless) | tr A-Z a-z)
+to_lower = $(shell printf '%s' "$(1)" | tr '[:upper:]' '[:lower:]')
+do_compile_native ?= false
+multiprocessing ?= false
+debug ?= false
+use_tsc ?= false
+headless ?= false
 
-SRCS = $(wildcard *.c) $(wildcard parse/*.c) $(wildcard playback/*.c) $(wildcard synth/*.c) $(wildcard third_party/*.c)
-OBJS = $(patsubst %.c, build/%.o, $(SRCS))
+IS_NATIVE   := $(call to_lower,$(do_compile_native))
+USE_OPENMP  := $(call to_lower,$(multiprocessing))
+IS_DEBUG    := $(call to_lower,$(debug))
+USE_TSC     := $(call to_lower,$(use_tsc))
+IS_HEADLESS := $(call to_lower,$(headless))
 
-ifeq (${tsc}, true)
+IS_MINGW := $(findstring mingw,$(shell $(CC) -dumpmachine))$(findstring w64,$(shell $(CC) -dumpmachine))
+
+CFLAGS  := -Wall -Wextra -ffunction-sections -fdata-sections
+LDFLAGS := -pthread -lm
+
+ifeq ($(IS_DEBUG),true)
+    CFLAGS  += -g -O0 -fno-omit-frame-pointer -fsanitize=address,undefined
+    LDFLAGS += -g -fsanitize=address,undefined
+else
+    CFLAGS  += -O3 -fstrict-overflow -fno-math-errno -flto=auto \
+               -fno-stack-protector -fno-semantic-interposition -fno-plt \
+               -fno-unwind-tables -fno-asynchronous-unwind-tables -fno-ident
+    LDFLAGS += -Wl,-rpath,'$$ORIGIN' -Wl,--gc-sections -Wl,--build-id=none -flto=auto -s
+endif
+
+ifeq ($(USE_TSC),true)
     CFLAGS += -DUSE_TSC_CLOCK
 endif
 
-ifeq (${dbg},true)
-    CFLAGS = -g -O0 -ffunction-sections -fdata-sections -fno-omit-frame-pointer -fsanitize=address -fsanitize=undefined
-    LDFLAGS = -g -pthread -lm
-endif
-
-ifeq (${native},true)
+ifeq ($(IS_NATIVE),true)
     CFLAGS += -march=native
 endif
 
-ifeq (${do_openmp},true)
-    CFLAGS += -fopenmp
+ifeq ($(USE_OPENMP),true)
+    CFLAGS  += -fopenmp
     LDFLAGS += -fopenmp
 endif
 
-ifeq (${is_headless},false)
+SRC_DIRS := . parse playback synth third_party
+SRCS     := $(foreach dir,$(SRC_DIRS),$(wildcard $(dir)/*.c))
+
+ifeq ($(IS_HEADLESS),false)
     CFLAGS += -DNOT_HEADLESS
-    SRCS += $(wildcard render/*.c) $(wildcard third_party/glad/src/*.c)
-    ifeq ($(strip $(IS_MINGW)),)
+    SRCS   += $(wildcard render/*.c) $(wildcard third_party/glad/src/*.c)
+
+    ifeq ($(IS_MINGW),)
         LDFLAGS += -lglfw -lGL
     else
-        GLFW_WIN_DIR ?=
-        ifeq (${GLFW_WIN_DIR},)
-            $(error GLFW_WIN_DIR not set. stopping compilation)
+        ifeq ($(GLFW_WIN_DIR),)
+            $(error GLFW_WIN_DIR not set. Stopping compilation)
         endif
-        LDFLAGS += -L$(GLFW_WIN_DIR)/lib-mingw-w64 -lglfw3 -mconsole -lopengl32 -lkernel32 -lgdi32 -luser32 -lkernel32
-        CFLAGS += -I$(GLFW_WIN_DIR)/include
+        CFLAGS  += -I$(GLFW_WIN_DIR)/include
+        LDFLAGS += -L$(GLFW_WIN_DIR)/lib-mingw-w64 -lglfw3 -mconsole -lopengl32 -lgdi32 -luser32 -lkernel32
     endif
 endif
 
-ifeq ($(strip $(IS_MINGW)),)
-    TARGET = build/sharkmidi
-else
-    TARGET = build/sharkmidi.exe
-endif
+OBJS   := $(patsubst %.c,$(BUILD_DIR)/%.o,$(SRCS))
+DEPS   := $(OBJS:.o=.d)
+TARGET := $(BUILD_DIR)/sharkmidi$(if $(IS_MINGW),.exe,)
 
 .PHONY: all clean
 
 all: $(TARGET)
 
 $(TARGET): $(OBJS)
-	$(CC) $(CFLAGS) $(OBJS) -o $@ $(LDFLAGS)
-
-build/%.o: %.c
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(OBJS) -o $@ $(LDFLAGS)
+
+$(BUILD_DIR)/%.o: %.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
+
+-include $(DEPS)
 
 clean:
 	rm -rf build/*.o build/parse build/playback build/synth build/render build/third_party

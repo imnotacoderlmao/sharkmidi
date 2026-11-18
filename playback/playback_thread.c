@@ -251,11 +251,13 @@ void StartPlayback(int singlethread)
             played = count;
             current_clock = timing->tick;
             timing++;
+#ifndef NOT_HEADLESS
             if (now >= nextstatsupdate)
             {
                 update_playback_stats(MAX(delta, onesixtyh));
                 nextstatsupdate = now + onesixtyh;
             }
+#endif
         }
         while (sysex->tick <= clock)
         {
