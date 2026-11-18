@@ -139,9 +139,13 @@ void clock_pause(void)
     }
 }
 
+#ifndef NOT_HEADLESS
+double last_time = 0.0, nextstatsupdate = 0.0;
+#endif
+
 TickGroup* timing = NULL;
 static RollingAvg mnps_avg = {0};
-static void update_playback_stats(void)
+void update_playback_stats(double dt)
 {   
     if (stopping)
         return;
@@ -150,7 +154,7 @@ static void update_playback_stats(void)
     int64_t delta_notes = playednotes - playednotes2;
     playednotes2 = playednotes;
 
-    notespersec = rolling_avg_update(&mnps_avg, delta_notes * 60);
+    notespersec = rolling_avg_update(&mnps_avg, delta_notes * 60) * (dt/onesixtyh);
 
     printf("tick: %s / %s | notes: %s / %s (%s/s) | bpm: %.2lf | midi thread: %10s fps",
         AddCommas(current_clock), AddCommas(maxTick), AddCommas(playednotes), AddCommas(totalnotes),
@@ -158,15 +162,6 @@ static void update_playback_stats(void)
     if (voicefetching)
         printf(" | %s voices", AddCommas(KDMAPI_GetVoiceCount()));
     fputs("    \r", stdout);
-}
-
-static atomic_flag stats_busy = ATOMIC_FLAG_INIT;
-void UpdatePlaybackStats(void)
-{
-    if (atomic_flag_test_and_set_explicit(&stats_busy, memory_order_acquire))
-        return;
-    update_playback_stats();
-    atomic_flag_clear_explicit(&stats_busy, memory_order_release);
 }
 
 void SubmitSysEx(SysExEvent sysex)
@@ -256,6 +251,11 @@ void StartPlayback(int singlethread)
             played = count;
             current_clock = timing->tick;
             timing++;
+            if (now >= nextstatsupdate)
+            {
+                update_playback_stats(MAX(delta, onesixtyh));
+                nextstatsupdate = now + onesixtyh;
+            }
         }
         while (sysex->tick <= clock)
         {

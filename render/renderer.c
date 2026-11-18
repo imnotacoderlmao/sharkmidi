@@ -83,6 +83,11 @@ static int dirtyOrd[MAX_POOL_PAGES];  // physical page -> its place in this pass
 static int dirtyPhys[SCATTER_PAGES];
 static int dirtyN;
 static GLint u_shift;
+// scatter by point: one image store per patch (see patch_scatter), used when the buffer can be viewed as a buffer
+// texture and the vertex shader has an image unit. otherwise, or with SHARKMIDI_PAGE_SCATTER set, whole pages are rewritten
+#define PATCH_CHUNK (1 << 16)
+static GLuint patchShader, patchVao, patchVbo, noteTex;
+static int imageScatterOk, imageScatter;
 
 static int paletteUploadPending = 0;
 
@@ -233,6 +238,42 @@ static void scatter_init(void)
     ovrCpu = (uint32_t*)malloc((size_t)SCATTER_PAGES * PAGE_NOTES * sizeof(uint32_t));
     for (int i = 0; i < MAX_POOL_PAGES; i++)
         dirtyOrd[i] = -1;
+
+    GLint maxVertImages = 0;
+    glGetIntegerv(GL_MAX_VERTEX_IMAGE_UNIFORMS, &maxVertImages);
+    imageScatterOk = maxVertImages >= 1 && getenv("SHARKMIDI_PAGE_SCATTER") == NULL;
+    if (imageScatterOk)
+    {
+        patchShader = build_shader(PatchVertSrc, ScatterFragSrc, 0);
+        glUseProgram(patchShader);
+        glUniform1i(glGetUniformLocation(patchShader, "uNotes"), 0); // image unit 0
+        glUseProgram(0);
+        glGenVertexArrays(1, &patchVao);
+        glGenBuffers(1, &patchVbo);
+        glBindVertexArray(patchVao);
+        glBindBuffer(GL_ARRAY_BUFFER, patchVbo);
+        glEnableVertexAttribArray(0);
+        glVertexAttribIPointer(0, 2, GL_UNSIGNED_INT, sizeof(Patch), (void*)0);
+        glBindVertexArray(0);
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+        glGenTextures(1, &noteTex);
+    }
+}
+
+// the note buffer as an image for patch_scatter, called when the buffer is a new one. a buffer texture holds at most
+// GL_MAX_TEXTURE_BUFFER_SIZE texels, a note is 3: a bigger pool patches page by page
+static void bind_note_image(void)
+{
+    imageScatter = 0;
+    if (!imageScatterOk) return;
+    GLint maxTexels = 0;
+    glGetIntegerv(GL_MAX_TEXTURE_BUFFER_SIZE, &maxTexels);
+    if ((int64_t)poolPages * PAGE_NOTES * 3 > maxTexels) return;
+    glBindTexture(GL_TEXTURE_BUFFER, noteTex);
+    glTexBuffer(GL_TEXTURE_BUFFER, GL_R32UI, vboBuffer);
+    glBindTexture(GL_TEXTURE_BUFFER, 0);
+    glBindImageTexture(0, noteTex, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_R32UI);
+    imageScatter = 1;
 }
 
 // the notes of the buffer as the input of the scatter, called when the buffer is a new one
@@ -296,6 +337,7 @@ static int pool_resize(int newPages, int keep)
     poolPages = newPages;
     bind_vertex_attribs(vao, vboBuffer);
     bind_scatter_attribs();
+    bind_note_image();
     if (keep)
     {
         for (int p = old; p < newPages; p++)
@@ -383,10 +425,38 @@ static void scatter_pass(void)
     dirtyN = 0;
 }
 
-// rewrites the pages collected in dirtyPhys with the ends of ovrCpu
+// one point per patch, the vertex shader stores the end tick into the buffer. the work is the number of patches, and
+// not, as with the pages, the number of notes in the pages that have one
+static void patch_scatter(void)
+{
+    glUseProgram(patchShader);
+    glEnable(GL_RASTERIZER_DISCARD);
+    glBindVertexArray(patchVao);
+    glBindBuffer(GL_ARRAY_BUFFER, patchVbo);
+    for (int64_t i = 0; i < patchN; i += PATCH_CHUNK)
+    {
+        int64_t n = patchN - i < PATCH_CHUNK ? patchN - i : PATCH_CHUNK;
+        glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(n * sizeof(Patch)), patches + i, GL_STREAM_DRAW);
+        glDrawArrays(GL_POINTS, 0, (GLsizei)n);
+    }
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindVertexArray(0);
+    glDisable(GL_RASTERIZER_DISCARD);
+    glUseProgram(0);
+    // the notes are read as vertex attributes next, and written by glBufferSubData (new notes), glCopyBufferSubData (resize)
+    glMemoryBarrier(GL_VERTEX_ATTRIB_ARRAY_BARRIER_BIT | GL_BUFFER_UPDATE_BARRIER_BIT);
+}
+
+// writes the ends in patches into the buffer
 static void flush_patches(void)
 {
     if (patchN == 0) return;
+    if (imageScatter)
+    {
+        patch_scatter();
+        patchN = 0;
+        return;
+    }
     for (int64_t i = 0; i < patchN; i++)
     {
         uint32_t phys = patches[i].note >> PAGE_SHIFT;

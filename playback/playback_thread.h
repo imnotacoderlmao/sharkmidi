@@ -11,5 +11,5 @@ extern _Atomic double playback_next_due; // when the playback thread will next l
 extern double tick, delta, tickscale, bpm, spin_margin;
 void clock_pause(void);
 void clock_skip(double ticks); // relative seek, applied by the playback thread
-void UpdatePlaybackStats(void);
+void update_playback_stats(double dt);
 #endif

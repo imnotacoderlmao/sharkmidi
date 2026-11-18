@@ -67,6 +67,17 @@ static const char* ScatterVertSrc =
 "    gl_Position = vec4(0.0);\n"
 "}\n";
 
+// writes the end tick of one note per point straight into the note buffer (an image over the same buffer), so the cost
+// of a patch no longer depends on the page it is in
+static const char* PatchVertSrc =
+"#version 420 core\n"
+"layout(location = 0) in uvec2 aPatch;\n"
+"layout(r32ui) uniform writeonly uimageBuffer uNotes;\n"
+"void main() {\n"
+"    imageStore(uNotes, int(aPatch.x) * 3 + 1, uvec4(aPatch.y));\n"
+"    gl_Position = vec4(0.0);\n"
+"}\n";
+
 static const char* ScatterFragSrc =
 "#version 420 core\n"
 "void main() {}\n";

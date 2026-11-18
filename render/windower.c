@@ -333,7 +333,7 @@ void Window_Run(const char* filepath)
 
         if (last_time >= nextstatsupdate)
         {
-            UpdatePlaybackStats();
+            update_playback_stats(MAX(delta_time, onesixtyh));
             smoothed_fps = rolling_avg_update(&fpsavg, delta_time);
             nextstatsupdate = last_time + onesixtyh;
         }
