@@ -311,6 +311,7 @@ void Window_Run(const char* filepath)
     glfwSetFramebufferSizeCallback(win, fb_resize_callback); 
     glfwSwapInterval(vsync);
     RollingAvg fpsavg = {0};
+    trackcolors = 1;
     double smoothed_fps = 0.0, nextstatsupdate = 0.0;
     last_time = get_time();
     

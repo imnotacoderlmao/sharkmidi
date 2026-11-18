@@ -61,7 +61,7 @@ static uint8_t* filePtr = NULL;
 static uint64_t fileLen = 0;
 static uint64_t filePos = 0;
 static uint16_t trackAmount = 0;
-int32_t midiloaded = 0, trackcolors = 1;
+int32_t midiloaded = 0, trackcolors = 0;
 static uint64_t eventcount = 0; // channel events
 static uint64_t bytecount = 0;  // bytes they take in eventArr (see midistorage.h)
 
