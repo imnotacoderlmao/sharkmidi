@@ -46,41 +46,24 @@ static const char* QuadFragSrc =
 "out vec4 fragColor;\n"
 "void main() { fragColor = vColor; }\n";
 
-// rewrites the notes of one page of the buffer of the notes, for transform feedback: the notes come in as they are, the
-// EndTick is replaced when the table uOvr (one entry per note, in the order of the pages being rewritten) has one,
-// 0 keeps it. gl_VertexID is the number of the note in the buffer, uShift moves it to its place in the table
-static const char* ScatterVertSrc =
-"#version 420 core\n"
-"layout(location = 0) in int aStartTick;\n"
-"layout(location = 1) in int aEndTick;\n"
-"layout(location = 2) in uint aPackedData;\n"
-"uniform usamplerBuffer uOvr;\n"
-"uniform int uShift;\n"
-"out int outStart;\n"
-"out int outEnd;\n"
-"out uint outPacked;\n"
-"void main() {\n"
-"    uint e = texelFetch(uOvr, gl_VertexID + uShift).r;\n"
-"    outStart = aStartTick;\n"
-"    outEnd = e != 0u ? int(e) : aEndTick;\n"
-"    outPacked = aPackedData;\n"
-"    gl_Position = vec4(0.0);\n"
-"}\n";
-
-// writes the end tick of one note per point straight into the note buffer (an image over the same buffer), so the cost
-// of a patch no longer depends on the page it is in
+// stores the end tick of one note per point into the note buffer, an image over it, so what a patch costs does not depend
+// on the page it is in. every point goes to the one pixel of a 1x1 target and its fragment does the store
 static const char* PatchVertSrc =
 "#version 420 core\n"
 "layout(location = 0) in uvec2 aPatch;\n"
-"layout(r32ui) uniform writeonly uimageBuffer uNotes;\n"
+"flat out uvec2 vPatch;\n"
 "void main() {\n"
-"    imageStore(uNotes, int(aPatch.x) * 3 + 1, uvec4(aPatch.y));\n"
-"    gl_Position = vec4(0.0);\n"
+"    vPatch = aPatch;\n"
+"    gl_Position = vec4(0.0, 0.0, 0.0, 1.0);\n"
 "}\n";
 
-static const char* ScatterFragSrc =
+static const char* PatchFragSrc =
 "#version 420 core\n"
-"void main() {}\n";
+"layout(r32ui) uniform writeonly uimageBuffer uNotes;\n"
+"flat in uvec2 vPatch;\n"
+"void main() {\n"
+"    imageStore(uNotes, int(vPatch.x) * 3 + 1, uvec4(vPatch.y));\n"
+"}\n";
 
 static const char* CursorVertSrc =
 "#version 420 core\n"

@@ -37,7 +37,7 @@ typedef struct
 
 static GLuint quadShader, cursorShader, frameUBO;
 static GLint uc_cursorX, uc_halfWidth, uc_yBottom, uc_yTop, uc_lineColor;
-static GLuint vao, cursorVAO, vboBuffer, paletteTex, scatterShader, scatterVao, scratchVbo, ovrVbo, ovrTex;
+static GLuint vao, cursorVAO, vboBuffer, paletteTex;
 
 // the notes are in video memory in pages of PAGE_NOTES, which the CPU only writes to (glBufferSubData). a note goes into the
 // next slot of the newest page when its note on is met, with EndTick 0 (still sounding, the shader draws it to the right
@@ -77,17 +77,13 @@ typedef struct
 } Patch; // note: the place of the note in the buffer (physical page * PAGE_NOTES + its slot)
 static Patch* patches;
 static int64_t patchN, patchCap;
-#define SCATTER_PAGES 64              // pages one scatter pass rewrites
-static uint32_t* ovrCpu;              // the ends of the pages of this pass, a page after the other, 0: no patch
-static int dirtyOrd[MAX_POOL_PAGES];  // physical page -> its place in this pass, -1: not in it
-static int dirtyPhys[SCATTER_PAGES];
-static int dirtyN;
-static GLint u_shift;
-// scatter by point: one image store per patch (see patch_scatter), used when the buffer can be viewed as a buffer
-// texture and the vertex shader has an image unit. otherwise, or with SHARKMIDI_PAGE_SCATTER set, whole pages are rewritten
+// the ends of notes that are already in video memory are written one by one: a point per patch, and its fragment stores the
+// end tick into the note buffer, seen as an image (a buffer texture). the work is the number of patches, not the notes
+// of the pages they are in. the points all go to the one pixel of a 1x1 target, only the store matters. the fragment
+// stage is used since every OpenGL 4.2 has image units there (the vertex stage may have none, Ivy Bridge)
 #define PATCH_CHUNK (1 << 16)
-static GLuint patchShader, patchVao, patchVbo, noteTex;
-static int imageScatterOk, imageScatter;
+static GLuint patchShader, patchVao, patchVbo, noteTex, patchFbo, patchRb;
+static GLint maxNoteTexels;   // GL_MAX_TEXTURE_BUFFER_SIZE, the pool can not have more than a third of it in notes
 
 static int paletteUploadPending = 0;
 
@@ -211,84 +207,48 @@ static void bind_vertex_attribs(GLuint array, GLuint buffer)
 }
 
 // ---- patch scatter ---------------------------------------------------------------------------------------------
-// the ends of notes that are already in video memory are written with transform feedback. it can only write in order,
-// not to places picked one by one, so it is done a page at a time: a vertex shader goes over all the notes of a page
-// and writes them out as they are, only with the EndTick from a table of ends (ovrCpu) where there is one, into a
-// scratch buffer, and the page is copied back over the old one. only the pages that have a patch are touched
 static void scatter_init(void)
 {
-    scatterShader = build_shader(ScatterVertSrc, ScatterFragSrc, 1);
-    glUseProgram(scatterShader);
-    glUniform1i(glGetUniformLocation(scatterShader, "uOvr"), 1); // texture unit 1, the palette has 0
-    u_shift = glGetUniformLocation(scatterShader, "uShift");
+    GLint maxFragImages = 0;
+    glGetIntegerv(GL_MAX_FRAGMENT_IMAGE_UNIFORMS, &maxFragImages);
+    glGetIntegerv(GL_MAX_TEXTURE_BUFFER_SIZE, &maxNoteTexels);
+    if (maxFragImages < 1)
+    {
+        fprintf(stderr, "no image units in the fragment stage, an OpenGL 4.2 driver always has them\n");
+        exit(1);
+    }
+    patchShader = build_shader(PatchVertSrc, PatchFragSrc, 0);
+    glUseProgram(patchShader);
+    glUniform1i(glGetUniformLocation(patchShader, "uNotes"), 0); // image unit 0
     glUseProgram(0);
 
-    glGenVertexArrays(1, &scatterVao);
-    glGenBuffers(1, &scratchVbo);
-    glGenBuffers(1, &ovrVbo);
-    glGenTextures(1, &ovrTex);
-    glBindBuffer(GL_COPY_WRITE_BUFFER, scratchVbo);
-    glBufferData(GL_COPY_WRITE_BUFFER, (GLsizeiptr)SCATTER_PAGES * PAGE_NOTES * sizeof(RenderNote), NULL, GL_STREAM_COPY);
-    glBindBuffer(GL_COPY_WRITE_BUFFER, ovrVbo);
-    glBufferData(GL_COPY_WRITE_BUFFER, (GLsizeiptr)SCATTER_PAGES * PAGE_NOTES * sizeof(uint32_t), NULL, GL_STREAM_DRAW);
-    glBindBuffer(GL_COPY_WRITE_BUFFER, 0);
-    glBindTexture(GL_TEXTURE_BUFFER, ovrTex);
-    glTexBuffer(GL_TEXTURE_BUFFER, GL_R32UI, ovrVbo);
-    glBindTexture(GL_TEXTURE_BUFFER, 0);
-    ovrCpu = (uint32_t*)malloc((size_t)SCATTER_PAGES * PAGE_NOTES * sizeof(uint32_t));
-    for (int i = 0; i < MAX_POOL_PAGES; i++)
-        dirtyOrd[i] = -1;
+    glGenVertexArrays(1, &patchVao);
+    glGenBuffers(1, &patchVbo);
+    glBindVertexArray(patchVao);
+    glBindBuffer(GL_ARRAY_BUFFER, patchVbo);
+    glEnableVertexAttribArray(0);
+    glVertexAttribIPointer(0, 2, GL_UNSIGNED_INT, sizeof(Patch), (void*)0);
+    glBindVertexArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
 
-    GLint maxVertImages = 0;
-    glGetIntegerv(GL_MAX_VERTEX_IMAGE_UNIFORMS, &maxVertImages);
-    imageScatterOk = maxVertImages >= 1 && getenv("SHARKMIDI_PAGE_SCATTER") == NULL;
-    if (imageScatterOk)
-    {
-        patchShader = build_shader(PatchVertSrc, ScatterFragSrc, 0);
-        glUseProgram(patchShader);
-        glUniform1i(glGetUniformLocation(patchShader, "uNotes"), 0); // image unit 0
-        glUseProgram(0);
-        glGenVertexArrays(1, &patchVao);
-        glGenBuffers(1, &patchVbo);
-        glBindVertexArray(patchVao);
-        glBindBuffer(GL_ARRAY_BUFFER, patchVbo);
-        glEnableVertexAttribArray(0);
-        glVertexAttribIPointer(0, 2, GL_UNSIGNED_INT, sizeof(Patch), (void*)0);
-        glBindVertexArray(0);
-        glBindBuffer(GL_ARRAY_BUFFER, 0);
-        glGenTextures(1, &noteTex);
-    }
+    glGenTextures(1, &noteTex);
+    glGenRenderbuffers(1, &patchRb);
+    glBindRenderbuffer(GL_RENDERBUFFER, patchRb);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_RGBA8, 1, 1);
+    glBindRenderbuffer(GL_RENDERBUFFER, 0);
+    glGenFramebuffers(1, &patchFbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, patchFbo);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, patchRb);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
-// the note buffer as an image for patch_scatter, called when the buffer is a new one. a buffer texture holds at most
-// GL_MAX_TEXTURE_BUFFER_SIZE texels, a note is 3: a bigger pool patches page by page
+// the note buffer as the image the patches are stored into, called when the buffer is a new one
 static void bind_note_image(void)
 {
-    imageScatter = 0;
-    if (!imageScatterOk) return;
-    GLint maxTexels = 0;
-    glGetIntegerv(GL_MAX_TEXTURE_BUFFER_SIZE, &maxTexels);
-    if ((int64_t)poolPages * PAGE_NOTES * 3 > maxTexels) return;
     glBindTexture(GL_TEXTURE_BUFFER, noteTex);
     glTexBuffer(GL_TEXTURE_BUFFER, GL_R32UI, vboBuffer);
     glBindTexture(GL_TEXTURE_BUFFER, 0);
     glBindImageTexture(0, noteTex, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_R32UI);
-    imageScatter = 1;
-}
-
-// the notes of the buffer as the input of the scatter, called when the buffer is a new one
-static void bind_scatter_attribs(void)
-{
-    glBindVertexArray(scatterVao);
-    glBindBuffer(GL_ARRAY_BUFFER, vboBuffer);
-    glEnableVertexAttribArray(0);
-    glVertexAttribIPointer(0, 1, GL_INT, sizeof(RenderNote), (void*)offsetof(RenderNote, StartTick));
-    glEnableVertexAttribArray(1);
-    glVertexAttribIPointer(1, 1, GL_INT, sizeof(RenderNote), (void*)offsetof(RenderNote, EndTick));
-    glEnableVertexAttribArray(2);
-    glVertexAttribIPointer(2, 1, GL_UNSIGNED_INT, sizeof(RenderNote), (void*)offsetof(RenderNote, PackedData));
-    glBindVertexArray(0);
-    glBindBuffer(GL_ARRAY_BUFFER, 0);
 }
 
 // ---- pages ----------------------------------------------------------------------------------------------------
@@ -309,6 +269,8 @@ static void ring_reset(void)
 // buffer starts empty. returns 0, and changes nothing, when there is no memory for it
 static int pool_resize(int newPages, int keep)
 {
+    if ((int64_t)newPages * PAGE_NOTES * 3 > maxNoteTexels) // a note is 3 texels of the image, more would not be reachable
+        return 0;
     GLuint newBuffer;
     glGenBuffers(1, &newBuffer);
     glBindBuffer(GL_ARRAY_BUFFER, newBuffer);
@@ -336,7 +298,6 @@ static int pool_resize(int newPages, int keep)
     vboBuffer = newBuffer;
     poolPages = newPages;
     bind_vertex_attribs(vao, vboBuffer);
-    bind_scatter_attribs();
     bind_note_image();
     if (keep)
     {
@@ -382,55 +343,16 @@ static inline void patch_add(uint32_t note, int32_t end)
     patches[patchN++] = (Patch){note, (uint32_t)end};
 }
 
-// rewrites the pages collected in dirtyPhys with the ends of ovrCpu
-static void scatter_pass(void)
-{
-    if (dirtyN == 0) return;
-    const GLsizeiptr pageBytes = (GLsizeiptr)PAGE_NOTES * sizeof(RenderNote);
-    glBindBuffer(GL_COPY_WRITE_BUFFER, ovrVbo);
-    glBufferSubData(GL_COPY_WRITE_BUFFER, 0, (GLsizeiptr)dirtyN * PAGE_NOTES * sizeof(uint32_t), ovrCpu);
-    glBindBuffer(GL_COPY_WRITE_BUFFER, 0);
-
-    glUseProgram(scatterShader);
-    glActiveTexture(GL_TEXTURE1);
-    glBindTexture(GL_TEXTURE_BUFFER, ovrTex);
-    glActiveTexture(GL_TEXTURE0);
-    glEnable(GL_RASTERIZER_DISCARD);
-    glBindVertexArray(scatterVao);
-    for (int i = 0; i < dirtyN; i++)
-    {
-        glUniform1i(u_shift, (i - dirtyPhys[i]) * PAGE_NOTES); // note n of the buffer is entry n + shift of the table
-        glBindBufferRange(GL_TRANSFORM_FEEDBACK_BUFFER, 0, scratchVbo, (GLintptr)i * pageBytes, pageBytes);
-        glBeginTransformFeedback(GL_POINTS);
-        glDrawArrays(GL_POINTS, dirtyPhys[i] * PAGE_NOTES, PAGE_NOTES);
-        glEndTransformFeedback();
-    }
-    glBindBufferBase(GL_TRANSFORM_FEEDBACK_BUFFER, 0, 0);
-    glBindVertexArray(0);
-    glDisable(GL_RASTERIZER_DISCARD);
-    glActiveTexture(GL_TEXTURE1);
-    glBindTexture(GL_TEXTURE_BUFFER, 0);
-    glActiveTexture(GL_TEXTURE0);
-    glUseProgram(0);
-
-    glBindBuffer(GL_COPY_READ_BUFFER, scratchVbo);
-    glBindBuffer(GL_COPY_WRITE_BUFFER, vboBuffer);
-    for (int i = 0; i < dirtyN; i++)
-    {
-        glCopyBufferSubData(GL_COPY_READ_BUFFER, GL_COPY_WRITE_BUFFER, (GLintptr)i * pageBytes, (GLintptr)dirtyPhys[i] * pageBytes, pageBytes);
-        dirtyOrd[dirtyPhys[i]] = -1;
-    }
-    glBindBuffer(GL_COPY_READ_BUFFER, 0);
-    glBindBuffer(GL_COPY_WRITE_BUFFER, 0);
-    dirtyN = 0;
-}
-
 // one point per patch, the vertex shader stores the end tick into the buffer. the work is the number of patches, and
 // not, as with the pages, the number of notes in the pages that have one
 static void patch_scatter(void)
 {
+    GLint viewport[4];
     glUseProgram(patchShader);
-    glEnable(GL_RASTERIZER_DISCARD);
+    glGetIntegerv(GL_VIEWPORT, viewport);
+    glBindFramebuffer(GL_FRAMEBUFFER, patchFbo);
+    glViewport(0, 0, 1, 1);
+    glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
     glBindVertexArray(patchVao);
     glBindBuffer(GL_ARRAY_BUFFER, patchVbo);
     for (int64_t i = 0; i < patchN; i += PATCH_CHUNK)
@@ -441,7 +363,9 @@ static void patch_scatter(void)
     }
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     glBindVertexArray(0);
-    glDisable(GL_RASTERIZER_DISCARD);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glUseProgram(0);
     // the notes are read as vertex attributes next, and written by glBufferSubData (new notes), glCopyBufferSubData (resize)
     glMemoryBarrier(GL_VERTEX_ATTRIB_ARRAY_BARRIER_BIT | GL_BUFFER_UPDATE_BARRIER_BIT);
@@ -451,28 +375,7 @@ static void patch_scatter(void)
 static void flush_patches(void)
 {
     if (patchN == 0) return;
-    if (imageScatter)
-    {
-        patch_scatter();
-        patchN = 0;
-        return;
-    }
-    for (int64_t i = 0; i < patchN; i++)
-    {
-        uint32_t phys = patches[i].note >> PAGE_SHIFT;
-        int ord = dirtyOrd[phys];
-        if (ord < 0)
-        {
-            if (dirtyN == SCATTER_PAGES)
-                scatter_pass();
-            ord = dirtyN++;
-            dirtyOrd[phys] = ord;
-            dirtyPhys[ord] = (int)phys;
-            memset(ovrCpu + (size_t)ord * PAGE_NOTES, 0, PAGE_NOTES * sizeof(uint32_t));
-        }
-        ovrCpu[(size_t)ord * PAGE_NOTES + (patches[i].note & PAGE_MASK)] = patches[i].end;
-    }
-    scatter_pass();
+    patch_scatter();
     patchN = 0;
 }
 
@@ -612,17 +515,16 @@ void Renderer_Dispose(void)
     sndN = sndCap = revCap = 0;
     pageCap = patchCap = pageLo = pageHi = pageOrigin = livePages = 0;
     glDeleteBuffers(1, &vboBuffer);
-    glDeleteBuffers(1, &scratchVbo);
-    glDeleteBuffers(1, &ovrVbo);
-    free(ovrCpu);
-    ovrCpu = NULL;
+    glDeleteBuffers(1, &patchVbo);
+    glDeleteFramebuffers(1, &patchFbo);
+    glDeleteRenderbuffers(1, &patchRb);
     glDeleteBuffers(1, &frameUBO);
-    glDeleteTextures(1, &ovrTex);
+    glDeleteTextures(1, &noteTex);
     glDeleteTextures(1, &paletteTex);
     glDeleteVertexArrays(1, &vao);
-    glDeleteVertexArrays(1, &scatterVao);
+    glDeleteVertexArrays(1, &patchVao);
     glDeleteVertexArrays(1, &cursorVAO);
-    glDeleteProgram(scatterShader);
+    glDeleteProgram(patchShader);
     glDeleteProgram(quadShader);
     glDeleteProgram(cursorShader);
     free(batch);
